@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.0
+pytest>=8.0
+pypdf>=6.0
+pymupdf>=1.27
+cryptography>=45.0
