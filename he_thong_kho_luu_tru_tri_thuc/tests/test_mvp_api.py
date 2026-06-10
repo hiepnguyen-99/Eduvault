@@ -1,5 +1,6 @@
 import tempfile
 import zipfile
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from src.eduvault.main import app
 
 
 def configure_temp_storage(root: Path):
+    os.environ["DATABASE_PROVIDER"] = "sqlite"
     ai_provider.api_key = ""
     database.DATA_DIR = root
     database.DB_PATH = root / "eduvault.db"
@@ -52,6 +54,11 @@ def test_mvp_auth_permissions_versioning_and_backup():
             )
             assert created.status_code == 201
             document_id = created.json()["id"]
+
+            detail = client.get(f"/api/documents/{document_id}", headers=lecturer)
+            assert detail.status_code == 200
+            assert detail.json()["content"]
+            assert detail.json()["id"] == document_id
 
             updated = client.put(
                 f"/api/documents/{document_id}",
@@ -195,11 +202,11 @@ def test_policies_control_behavior_docx_and_rollback():
                 headers=admin,
                 json={"value": {"private_requires_owner_approval": False}},
             )
-            assert permission.status_code == 200
+            assert permission.status_code == 422
             visible_after = client.get("/api/dashboard", headers=lecturer).json()["documents"]
-            assert any(doc["id"] == "doc-exam-process" for doc in visible_after)
+            assert all(doc["id"] != "doc-exam-process" for doc in visible_after)
             request = client.post("/api/access-requests/doc-exam-process", headers=lecturer)
-            assert request.status_code == 400
+            assert request.status_code == 201
 
             backup_policy = client.put(
                 "/api/admin/policies/backup_321",
@@ -337,6 +344,61 @@ def test_private_owner_anonymity_and_strict_chatbot_scope():
             assert [stage["name"] for stage in pipeline.json()["stages"]] == [
                 "upload", "parse_pdf_docx_ocr", "chunk", "embedding", "vector_store", "permission_filter", "retrieve_answer"
             ]
+
+
+def test_private_file_requires_owner_approval_before_download():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            owner = login(client, "GV001")
+            requester = login(client, "GVNEW")
+            head = login(client, "TBM01")
+            admin = login(client, "ADMIN")
+            uploaded = client.post(
+                "/api/documents/upload",
+                headers={
+                    **owner,
+                    "X-Filename": "private.txt",
+                    "X-Title": "Private",
+                    "X-Topic": "Test",
+                    "X-Doc-Type": "Hoc lieu",
+                    "X-Visibility": "private",
+                    "Content-Type": "text/plain",
+                },
+                content=b"private-content",
+            )
+            document_id = uploaded.json()["document"]["id"]
+            asset_id = uploaded.json()["asset"]["id"]
+
+            for unauthorized in (requester, head, admin):
+                assert client.get(f"/api/documents/{document_id}", headers=unauthorized).status_code == 403
+                assert client.get(f"/api/documents/{document_id}/versions", headers=unauthorized).status_code == 403
+                assert client.get(f"/api/documents/{document_id}/provenance", headers=unauthorized).status_code == 403
+                assert client.get(f"/api/files/{asset_id}", headers=unauthorized).status_code == 403
+                assert client.delete(f"/api/documents/{document_id}", headers=unauthorized).status_code == 403
+
+            admin_update = client.put(
+                f"/api/documents/{document_id}",
+                headers=admin,
+                json={"title": "Private", "doc_type": "Hoc lieu", "topic": "Test", "visibility": "private", "content": "changed"},
+            )
+            assert admin_update.status_code == 403
+            assert client.post(f"/api/documents/{document_id}/rollback/1", headers=admin).status_code == 403
+
+            access_request = client.post(f"/api/access-requests/{document_id}", headers=requester)
+            assert access_request.status_code == 201
+            request_id = access_request.json()["id"]
+            assert client.post(f"/api/access-requests/{request_id}/approved", headers=admin).status_code == 403
+            assert client.get(f"/api/files/{asset_id}", headers=requester).status_code == 403
+
+            assert client.post(f"/api/access-requests/{request_id}/approved", headers=owner).status_code == 200
+            assert client.get(f"/api/documents/{document_id}", headers=requester).status_code == 200
+            assert client.get(f"/api/files/{asset_id}", headers=requester).content == b"private-content"
+            provenance = client.get(f"/api/documents/{document_id}/provenance", headers=requester).json()
+            assert provenance["access"] == {"type": "approved_request", "request_id": request_id}
+            assert client.post(f"/api/access-requests/{request_id}/revoke", headers=admin).status_code == 403
+            assert client.post(f"/api/access-requests/{request_id}/revoke", headers=owner).status_code == 200
+            assert client.get(f"/api/files/{asset_id}", headers=requester).status_code == 403
 
 
 def test_personal_cloud_connections_are_scoped_per_user():

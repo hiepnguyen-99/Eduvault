@@ -4,7 +4,6 @@ import json
 import math
 import re
 import shutil
-import sqlite3
 import uuid
 import zipfile
 from io import BytesIO
@@ -12,10 +11,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .ai import ai_provider
-from .database import BACKUP_DIR, DB_PATH, STORAGE_DIR, hash_secret, now, rows
-
-
-ELEVATED_ROLES = {"head", "admin"}
+from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, now, restore_database, rows, snapshot_database
 
 
 def audit(db, actor: str, action: str, resource_type: str, resource_id: str | None, detail: dict | None = None):
@@ -31,10 +27,7 @@ def policy_value(db, key: str, fallback: dict) -> dict:
 
 
 def can_read(db, user: dict, document: dict) -> bool:
-    if document["visibility"] == "public" or document["owner_code"] == user["code"] or user["role"] in ELEVATED_ROLES:
-        return True
-    permission_policy = policy_value(db, "permission_rules", {"private_requires_owner_approval": True})
-    if not permission_policy.get("private_requires_owner_approval", True):
+    if document["visibility"] == "public" or document["owner_code"] == user["code"]:
         return True
     approved = db.execute(
         "SELECT 1 FROM access_requests WHERE document_id=? AND requester_code=? AND status='approved'",
@@ -79,7 +72,7 @@ def list_deleted_documents(db, user: dict) -> list[dict]:
 
 
 def soft_delete_document(db, user: dict, document: dict) -> dict:
-    if document["owner_code"] != user["code"] and user["role"] != "admin":
+    if document["owner_code"] != user["code"]:
         raise PermissionError("Bạn không có quyền xóa tài liệu này.")
     if document.get("deleted_at"):
         raise ValueError("Tài liệu đã nằm trong thùng rác.")
@@ -91,7 +84,7 @@ def soft_delete_document(db, user: dict, document: dict) -> dict:
 
 
 def restore_deleted_document(db, user: dict, document: dict) -> dict:
-    if document["owner_code"] != user["code"] and user["role"] != "admin":
+    if document["owner_code"] != user["code"]:
         raise PermissionError("Bạn không có quyền khôi phục tài liệu này.")
     if not document.get("deleted_at"):
         raise ValueError("Tài liệu không nằm trong thùng rác.")
@@ -249,7 +242,7 @@ def extract_text(filename: str, mime_type: str, raw: bytes) -> str:
 
 
 def update_document(db, user: dict, document: dict, payload: dict) -> dict:
-    if document["owner_code"] != user["code"] and user["role"] != "admin":
+    if document["owner_code"] != user["code"]:
         raise PermissionError("Bạn không có quyền cập nhật tài liệu này.")
     content = payload.get("content", "").strip()
     version = document["current_version"] + 1
@@ -272,7 +265,7 @@ def update_document(db, user: dict, document: dict, payload: dict) -> dict:
 
 
 def rollback_document(db, user: dict, document: dict, target: int) -> dict:
-    if document["owner_code"] != user["code"] and user["role"] != "admin":
+    if document["owner_code"] != user["code"]:
         raise PermissionError("Bạn không có quyền rollback tài liệu này.")
     source = db.execute("SELECT storage_path FROM versions WHERE document_id=? AND version_no=?", (document["id"], target)).fetchone()
     if not source:
@@ -354,11 +347,8 @@ def create_backup(db, user: dict) -> dict:
     backup_id = f"backup-{uuid.uuid4().hex[:10]}"
     target = BACKUP_DIR / backup_id
     target.mkdir(parents=True)
-    destination = sqlite3.connect(target / "eduvault.db")
-    try:
-        db.backup(destination)
-    finally:
-        destination.close()
+    database_file = target / ("eduvault.db" if database_backend() == "sqlite" else "eduvault.mysql.json")
+    snapshot_database(db, database_file)
     shutil.copytree(STORAGE_DIR, target / "storage")
     db.execute("INSERT INTO backup_logs VALUES(?,?,?,?,?)", (backup_id, str(target), "success", user["code"], now()))
     audit(db, user["code"], "backup.create", "backup", backup_id)
@@ -370,7 +360,7 @@ def restore_backup(db, user: dict, backup_id: str) -> dict:
     if not backup:
         raise ValueError("Không tìm thấy bản backup hợp lệ.")
     source_dir = Path(backup["storage_path"])
-    source_db = source_dir / "eduvault.db"
+    source_db = source_dir / ("eduvault.db" if database_backend() == "sqlite" else "eduvault.mysql.json")
     source_storage = source_dir / "storage"
     if not source_db.exists() or not source_storage.exists():
         raise ValueError("Bản backup thiếu database hoặc storage.")
@@ -378,18 +368,11 @@ def restore_backup(db, user: dict, backup_id: str) -> dict:
     safety_id = f"pre-restore-{uuid.uuid4().hex[:8]}"
     safety_dir = BACKUP_DIR / safety_id
     safety_dir.mkdir(parents=True)
-    safety_db = sqlite3.connect(safety_dir / "eduvault.db")
-    try:
-        db.backup(safety_db)
-    finally:
-        safety_db.close()
+    safety_db = safety_dir / ("eduvault.db" if database_backend() == "sqlite" else "eduvault.mysql.json")
+    snapshot_database(db, safety_db)
     shutil.copytree(STORAGE_DIR, safety_dir / "storage")
 
-    source = sqlite3.connect(source_db)
-    try:
-        source.backup(db)
-    finally:
-        source.close()
+    restore_database(db, source_db)
     shutil.copytree(source_storage, STORAGE_DIR, dirs_exist_ok=True)
     audit(db, user["code"], "backup.restore", "backup", backup_id, {"safety_backup": safety_id})
     return {"restored": backup_id, "safety_backup": safety_id, "status": "success"}

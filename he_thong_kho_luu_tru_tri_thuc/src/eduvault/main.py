@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 import html
+import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .ai import ai_provider
 from .cloud import PROVIDERS, authorization_url, disconnect, exchange_code, list_connections, sync_user_document
-from .database import ROOT, connection, hash_secret, init_database, now, rows, transaction
+from .database import ROOT, connection, database_backend, hash_secret, init_database, now, rows, transaction
 from .services import (
     anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup,
     create_document, extract_text, guess_metadata, index_document, knowledge_summary, list_deleted_documents, list_documents, permanently_delete_document,
@@ -35,7 +36,18 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="EduVault API", version="1.0.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"], allow_methods=["*"], allow_headers=["*"])
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class Login(BaseModel):
@@ -137,7 +149,13 @@ def get_active_document(db, document_id: str) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": app.version, "ai": ai_provider.status()}
+    return {
+        "status": "ok",
+        "version": app.version,
+        "database": database_backend(),
+        "max_upload_mb": MAX_UPLOAD_BYTES // 1024 // 1024,
+        "ai": ai_provider.status(),
+    }
 
 
 @app.get("/api/ai/status")
@@ -262,7 +280,7 @@ async def analyze_file(request: Request, x_filename: str = Header(), user: dict 
     raw = await request.body()
     if not raw:
         raise HTTPException(400, "File phân tích đang trống.")
-    if len(raw) > 25 * 1024 * 1024:
+    if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File vượt quá giới hạn 25 MB của MVP.")
     filename = unquote(x_filename)
     content = extract_text(filename, request.headers.get("content-type", "application/octet-stream"), raw)
@@ -349,7 +367,7 @@ async def upload_document(
     raw = await request.body()
     if not raw:
         raise HTTPException(400, "File tải lên đang trống.")
-    if len(raw) > 25 * 1024 * 1024:
+    if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File vượt quá giới hạn 25 MB của MVP.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
@@ -384,6 +402,8 @@ async def upload_new_version(
     raw = await request.body()
     if not raw:
         raise HTTPException(400, "File tải lên đang trống.")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File exceeds the configured {MAX_UPLOAD_BYTES // 1024 // 1024} MB limit.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
     payload = {
@@ -410,6 +430,15 @@ def update(document_id: str, payload: DocumentInput, user: dict = Depends(curren
         raise HTTPException(403, str(exc))
 
 
+@app.get("/api/documents/{document_id}")
+def document_detail(document_id: str, user: dict = Depends(current_user)):
+    with connection() as db:
+        document = get_active_document(db, document_id)
+        if not can_read(db, user, document):
+            raise HTTPException(403, "Bạn không có quyền xem tài liệu.")
+        return {**anonymize_document(document, user), "content": content_for(db, document)}
+
+
 @app.get("/api/documents/{document_id}/versions")
 def versions(document_id: str, user: dict = Depends(current_user)):
     with connection() as db:
@@ -429,6 +458,13 @@ def provenance(document_id: str, user: dict = Depends(current_user)):
         document = get_document(db, document_id)
         if not can_read(db, user, document):
             raise HTTPException(403, "Bạn không có quyền xem nguồn gốc tài liệu.")
+        access = {"type": "public" if document["visibility"] == "public" else "owner", "request_id": None}
+        if document["visibility"] == "private" and document["owner_code"] != user["code"]:
+            approved = db.execute(
+                "SELECT id FROM access_requests WHERE document_id=? AND requester_code=? AND status='approved' ORDER BY resolved_at DESC LIMIT 1",
+                (document_id, user["code"]),
+            ).fetchone()
+            access = {"type": "approved_request", "request_id": approved["id"] if approved else None}
         versions_result = rows(db.execute("SELECT id,version_no,created_by,created_at FROM versions WHERE document_id=? ORDER BY version_no DESC", (document_id,)).fetchall())
         if document["visibility"] == "private" and document["owner_code"] != user["code"]:
             for version in versions_result:
@@ -438,6 +474,7 @@ def provenance(document_id: str, user: dict = Depends(current_user)):
             "versions": versions_result,
             "sync_history": rows(db.execute("SELECT * FROM sync_logs WHERE document_id=? ORDER BY created_at DESC", (document_id,)).fetchall()),
             "files": rows(db.execute("SELECT id,version_no,original_name,mime_type,size,created_at FROM file_assets WHERE document_id=? ORDER BY version_no DESC", (document_id,)).fetchall()),
+            "access": access,
         }
 
 
@@ -457,7 +494,7 @@ def download_file(asset_id: str, user: dict = Depends(current_user)):
 def permissions(user: dict = Depends(current_user)):
     with connection() as db:
         readable = list_documents(db, user)
-        editable = [item for item in readable if item["owner_code"] == user["code"] or user["role"] == "admin"]
+        editable = [item for item in readable if item["owner_code"] == user["code"]]
         restricted = rows(db.execute(
             "SELECT id,title,owner_code,topic FROM documents WHERE visibility='private' AND owner_code!=?",
             (user["code"],),
@@ -597,14 +634,13 @@ def backup_compliance(user: dict = Depends(require_roles("head", "admin"))):
 @app.post("/api/access-requests/{document_id}", status_code=201)
 def request_access(document_id: str, user: dict = Depends(current_user)):
     with transaction() as db:
-        document = get_document(db, document_id)
+        document = get_active_document(db, document_id)
         if document["visibility"] != "private":
             raise HTTPException(400, "Tài liệu này không yêu cầu phê duyệt.")
-        import json
-        policy_row = db.execute("SELECT value FROM policies WHERE key='permission_rules'").fetchone()
-        policy = json.loads(policy_row["value"]) if policy_row else {"private_requires_owner_approval": True}
-        if not policy.get("private_requires_owner_approval", True):
-            raise HTTPException(400, "Policy hiện tại không yêu cầu chủ sở hữu phê duyệt.")
+        if document["owner_code"] == user["code"]:
+            raise HTTPException(400, "Bạn đã là chủ sở hữu tài liệu.")
+        if can_read(db, user, document):
+            raise HTTPException(400, "Bạn đã được cấp quyền đọc tài liệu.")
         request_id = f"req-{secrets.token_hex(6)}"
         try:
             db.execute("INSERT INTO access_requests VALUES(?,?,?,?, 'pending', ?, NULL)", (request_id, document_id, user["code"], document["owner_code"], now()))
@@ -614,13 +650,26 @@ def request_access(document_id: str, user: dict = Depends(current_user)):
         return {"id": request_id, "status": "pending"}
 
 
+@app.post("/api/access-requests/{request_id}/revoke")
+def revoke_access(request_id: str, user: dict = Depends(current_user)):
+    with transaction() as db:
+        request = db.execute("SELECT * FROM access_requests WHERE id=? AND status='approved'", (request_id,)).fetchone()
+        if not request:
+            raise HTTPException(404, "Không tìm thấy quyền truy cập đang có hiệu lực.")
+        if request["owner_code"] != user["code"]:
+            raise HTTPException(403, "Chỉ chủ sở hữu được thu hồi quyền truy cập.")
+        db.execute("UPDATE access_requests SET status='revoked',resolved_at=? WHERE id=?", (now(), request_id))
+        audit(db, user["code"], "access.revoked", "request", request_id)
+        return {"id": request_id, "status": "revoked"}
+
+
 @app.post("/api/access-requests/{request_id}/{decision}")
 def decide_access(request_id: str, decision: Literal["approved", "denied"], user: dict = Depends(current_user)):
     with transaction() as db:
         request = db.execute("SELECT * FROM access_requests WHERE id=? AND status='pending'", (request_id,)).fetchone()
         if not request:
             raise HTTPException(404, "Không tìm thấy yêu cầu đang chờ.")
-        if request["owner_code"] != user["code"] and user["role"] != "admin":
+        if request["owner_code"] != user["code"]:
             raise HTTPException(403, "Bạn không có quyền phê duyệt yêu cầu.")
         db.execute("UPDATE access_requests SET status=?,resolved_at=? WHERE id=?", (decision, now(), request_id))
         audit(db, user["code"], f"access.{decision}", "request", request_id)
@@ -674,8 +723,8 @@ def update_policy(key: str, payload: PolicyInput, user: dict = Depends(require_r
         if payload.value["offsite"] > payload.value["copies"]:
             raise HTTPException(422, "Số bản ngoài hệ thống không thể lớn hơn tổng số bản sao.")
     elif key == "permission_rules":
-        if not isinstance(payload.value.get("private_requires_owner_approval"), bool):
-            raise HTTPException(422, "Quy tắc phê duyệt tài liệu Private phải là true hoặc false.")
+        if payload.value.get("private_requires_owner_approval") is not True:
+            raise HTTPException(422, "Tài liệu riêng tư luôn bắt buộc chủ sở hữu phê duyệt.")
     elif key == "storage_rules":
         naming = payload.value.get("naming", "")
         retention = payload.value.get("retention_years")
