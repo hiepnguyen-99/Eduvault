@@ -15,6 +15,7 @@ DATA_DIR = ROOT / "data" / "mvp"
 DB_PATH = DATA_DIR / "eduvault.db"
 STORAGE_DIR = DATA_DIR / "storage"
 BACKUP_DIR = DATA_DIR / "backups"
+_ACTIVE_PROVIDER: str | None = None
 
 def load_env_file() -> None:
     env_file = ROOT / ".env"
@@ -32,7 +33,7 @@ load_env_file()
 
 
 def database_backend() -> str:
-    return os.getenv("DATABASE_PROVIDER", "sqlite").strip().lower()
+    return _ACTIVE_PROVIDER or os.getenv("DATABASE_PROVIDER", "sqlite").strip().lower()
 
 
 def now() -> str:
@@ -92,11 +93,23 @@ class MySQLConnection:
 
 
 def connect():
+    global _ACTIVE_PROVIDER
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    if database_backend() == "mysql":
-        return MySQLConnection()
+    configured = os.getenv("DATABASE_PROVIDER", "sqlite").strip().lower()
+    if configured == "mysql" and _ACTIVE_PROVIDER != "sqlite-fallback":
+        try:
+            connection = MySQLConnection()
+            _ACTIVE_PROVIDER = "mysql"
+            return connection
+        except Exception:
+            allow_fallback = os.getenv("DATABASE_FALLBACK_SQLITE", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if not allow_fallback:
+                raise
+            _ACTIVE_PROVIDER = "sqlite-fallback"
+    elif configured != "mysql":
+        _ACTIVE_PROVIDER = "sqlite"
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
@@ -208,6 +221,25 @@ CREATE TABLE IF NOT EXISTS cloud_sync_logs (
   status TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL,
   FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(document_id) REFERENCES documents(id)
 );
+CREATE TABLE IF NOT EXISTS document_v2_state (
+  document_id TEXT PRIMARY KEY, classification TEXT NOT NULL DEFAULT 'private',
+  lifecycle_status TEXT NOT NULL DEFAULT 'published', scan_status TEXT NOT NULL DEFAULT 'clean',
+  extraction_status TEXT NOT NULL DEFAULT 'completed', indexing_status TEXT NOT NULL DEFAULT 'completed',
+  publish_after TEXT, updated_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id)
+);
+CREATE TABLE IF NOT EXISTS object_refs (
+  id TEXT PRIMARY KEY, document_id TEXT NOT NULL, version_no INTEGER NOT NULL,
+  kind TEXT NOT NULL, provider TEXT NOT NULL, object_uri TEXT NOT NULL,
+  object_version TEXT NOT NULL DEFAULT '', checksum TEXT NOT NULL, size INTEGER NOT NULL,
+  content_type TEXT NOT NULL, created_at TEXT NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id)
+);
+CREATE TABLE IF NOT EXISTS outbox_events (
+  id TEXT PRIMARY KEY, event_type TEXT NOT NULL, aggregate_id TEXT NOT NULL,
+  payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, published_at TEXT
+);
 """
 
 MYSQL_SCHEMA = """
@@ -264,6 +296,25 @@ CREATE TABLE IF NOT EXISTS sync_logs ( id VARCHAR(64) PRIMARY KEY, storage_id VA
 CREATE TABLE IF NOT EXISTS cloud_connections ( user_code VARCHAR(30) NOT NULL, provider VARCHAR(80) NOT NULL, account_email VARCHAR(255) NOT NULL, access_token LONGTEXT NOT NULL, refresh_token LONGTEXT NOT NULL, expires_in INT NOT NULL DEFAULT 0, status VARCHAR(30) NOT NULL DEFAULT 'connected', last_sync_at VARCHAR(40), last_error TEXT, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL, PRIMARY KEY(user_code, provider), FOREIGN KEY(user_code) REFERENCES users(code) ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS oauth_states ( state VARCHAR(128) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, provider VARCHAR(80) NOT NULL, created_at VARCHAR(40) NOT NULL, FOREIGN KEY(user_code) REFERENCES users(code) ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS cloud_sync_logs ( id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, provider VARCHAR(80) NOT NULL, document_id VARCHAR(64) NOT NULL, status VARCHAR(30) NOT NULL, detail TEXT NOT NULL, created_at VARCHAR(40) NOT NULL, FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(document_id) REFERENCES documents(id) ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS document_v2_state (
+  document_id VARCHAR(64) PRIMARY KEY, classification VARCHAR(30) NOT NULL DEFAULT 'private',
+  lifecycle_status VARCHAR(30) NOT NULL DEFAULT 'published', scan_status VARCHAR(30) NOT NULL DEFAULT 'clean',
+  extraction_status VARCHAR(30) NOT NULL DEFAULT 'completed', indexing_status VARCHAR(30) NOT NULL DEFAULT 'completed',
+  publish_after VARCHAR(40), updated_at VARCHAR(40) NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS object_refs (
+  id VARCHAR(64) PRIMARY KEY, document_id VARCHAR(64) NOT NULL, version_no INT NOT NULL,
+  kind VARCHAR(30) NOT NULL, provider VARCHAR(40) NOT NULL, object_uri TEXT NOT NULL,
+  object_version VARCHAR(255) NOT NULL DEFAULT '', checksum VARCHAR(64) NOT NULL, size BIGINT NOT NULL,
+  content_type VARCHAR(255) NOT NULL, created_at VARCHAR(40) NOT NULL,
+  FOREIGN KEY(document_id) REFERENCES documents(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS outbox_events (
+  id VARCHAR(64) PRIMARY KEY, event_type VARCHAR(100) NOT NULL, aggregate_id VARCHAR(64) NOT NULL,
+  payload LONGTEXT NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'pending',
+  attempts INT NOT NULL DEFAULT 0, created_at VARCHAR(40) NOT NULL, published_at VARCHAR(40)
+) ENGINE=InnoDB;
 """
 
 
@@ -287,7 +338,7 @@ SEED_DOCS = [
 def init_database() -> None:
     with transaction() as db:
         db.executescript(MYSQL_SCHEMA if database_backend() == "mysql" else SCHEMA)
-        if database_backend() == "sqlite":
+        if database_backend() != "mysql":
             columns = {row["name"] for row in db.execute("PRAGMA table_info(documents)").fetchall()}
             if "folder_path" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''")
@@ -321,6 +372,15 @@ def init_database() -> None:
             (json.dumps({
                 "metadata_instructions": "Phân loại tài liệu học thuật tiếng Việt. Chỉ trả JSON hợp lệ, không markdown.",
                 "answer_instructions": "Trả lời bằng tiếng Việt, chỉ dựa trên ngữ cảnh. Nêu tên tài liệu nguồn và không tiết lộ dữ liệu ngoài ngữ cảnh."
+            }, ensure_ascii=False), now()),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO policies VALUES ('exam_publication', ?, ?)",
+            (json.dumps({
+                "classification_before_exam": "confidential",
+                "read_roles_before_exam": ["head"],
+                "publish_after_exam": True,
+                "public_scope": "authenticated_faculty",
             }, ensure_ascii=False), now()),
         )
         db.execute(
@@ -361,6 +421,12 @@ def init_database() -> None:
                 "INSERT INTO versions VALUES (?, ?, 1, ?, ?, ?, ?)",
                 (f"ver-{slug}-1", doc_id, str(path), digest, owner, timestamp),
             )
+        for document in db.execute("SELECT id,title,visibility,topic,doc_type FROM documents").fetchall():
+            classification = "confidential" if "đề thi" in f"{document['title']} {document['topic']} {document['doc_type']}".lower() else document["visibility"]
+            db.execute(
+                "INSERT OR IGNORE INTO document_v2_state(document_id,classification,lifecycle_status,scan_status,extraction_status,indexing_status,updated_at) VALUES(?,?,'published','clean','completed','completed',?)",
+                (document["id"], classification, now()),
+            )
 
 
 def rows(items) -> list[dict]:
@@ -372,11 +438,12 @@ SNAPSHOT_TABLES = [
     "access_requests", "audit_logs", "policies", "backup_logs", "courses",
     "transfers", "external_storages", "sync_logs", "cloud_connections",
     "oauth_states", "cloud_sync_logs",
+    "document_v2_state", "object_refs", "outbox_events",
 ]
 
 
 def snapshot_database(db, destination: Path) -> None:
-    if database_backend() == "sqlite":
+    if database_backend() != "mysql":
         target = sqlite3.connect(destination)
         try:
             db.backup(target)
@@ -388,7 +455,7 @@ def snapshot_database(db, destination: Path) -> None:
 
 
 def restore_database(db, source: Path) -> None:
-    if database_backend() == "sqlite":
+    if database_backend() != "mysql":
         source_db = sqlite3.connect(source)
         try:
             source_db.backup(db)

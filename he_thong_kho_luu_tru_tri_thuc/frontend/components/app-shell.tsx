@@ -33,7 +33,7 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
     <aside className="h-full w-[280px] bg-[var(--sidebar)] text-white flex flex-col">
       <div className="h-[72px] px-5 flex items-center gap-3 border-b border-white/10">
         <div className="h-9 w-9 rounded-lg bg-blue-500 grid place-items-center"><BookOpenCheck size={20}/></div>
-        <div><strong className="block text-[15px] tracking-tight">EduVault</strong><span className="text-[10px] text-blue-200 uppercase tracking-[.16em]">Hệ tri thức</span></div>
+        <div><strong className="block max-w-[130px] text-[12px] font-bold uppercase leading-4 tracking-wide">Kho lưu trữ tri thức</strong></div>
       </div>
       <nav className="p-3 space-y-1 flex-1" aria-label="Điều hướng chính">
         <p className="px-3 py-2 text-[10px] font-bold uppercase tracking-[.16em] text-blue-200/60">Không gian làm việc</p>
@@ -44,9 +44,9 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
         })}
       </nav>
       <div className="m-3 rounded-xl border border-white/10 bg-white/5 p-3">
-        <div className="flex justify-between text-xs font-bold"><span>Dung lượng</span><span>68%</span></div>
-        <div className="mt-2 h-1.5 rounded-full bg-white/10"><div className="h-full w-[68%] rounded-full bg-blue-400"/></div>
-        <p className="mt-2 text-[10px] text-blue-100/60">6.8 TB / 10 TB</p>
+        <div className="flex justify-between text-xs font-bold"><span>Dung lượng demo V2</span><span>100 GB</span></div>
+        <div className="mt-2 h-1.5 rounded-full bg-white/10"><div className="h-full w-[12%] rounded-full bg-blue-400"/></div>
+        <p className="mt-2 text-[10px] text-blue-100/60">MySQL metadata · MinIO file gốc</p>
       </div>
     </aside>
   );

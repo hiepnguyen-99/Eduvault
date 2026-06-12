@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from src.eduvault import database, services
+from src.eduvault import database, main as main_module, services
 from src.eduvault.ai import ai_provider
 from src.eduvault.main import app
 
@@ -28,6 +28,55 @@ def login(client: TestClient, code: str) -> dict:
     response = client.post("/api/auth/login", json={"code": code, "password": code})
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+def test_analyze_file_rejects_oversized_input_before_processing():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        original_limit = main_module.MAX_AI_ANALYZE_BYTES
+        main_module.MAX_AI_ANALYZE_BYTES = 4
+        try:
+            with TestClient(app) as client:
+                lecturer = login(client, "GV001")
+                response = client.post(
+                    "/api/documents/analyze-file",
+                    headers={**lecturer, "X-Filename": "large.pdf", "Content-Type": "application/pdf"},
+                    content=b"12345",
+                )
+                assert response.status_code == 413
+                assert "AI phân tích trực tiếp" in response.json()["detail"]
+        finally:
+            main_module.MAX_AI_ANALYZE_BYTES = original_limit
+
+
+def test_upload_accepts_file_larger_than_ai_analysis_limit():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        original_ai_limit = main_module.MAX_AI_ANALYZE_BYTES
+        original_upload_limit = main_module.MAX_UPLOAD_BYTES
+        main_module.MAX_AI_ANALYZE_BYTES = 4
+        main_module.MAX_UPLOAD_BYTES = 64
+        try:
+            with TestClient(app) as client:
+                lecturer = login(client, "GV001")
+                response = client.post(
+                    "/api/documents/upload",
+                    headers={
+                        **lecturer,
+                        "X-Filename": "large.txt",
+                        "X-Title": "Large upload",
+                        "X-Topic": "Upload",
+                        "X-Doc-Type": "Demo",
+                        "X-Visibility": "private",
+                        "Content-Type": "text/plain",
+                    },
+                    content=b"large file content",
+                )
+                assert response.status_code == 201
+                assert response.json()["asset"]["size"] == len(b"large file content")
+        finally:
+            main_module.MAX_AI_ANALYZE_BYTES = original_ai_limit
+            main_module.MAX_UPLOAD_BYTES = original_upload_limit
 
 
 def test_mvp_auth_permissions_versioning_and_backup():
@@ -76,6 +125,16 @@ def test_mvp_auth_permissions_versioning_and_backup():
 
             versions = client.get(f"/api/documents/{document_id}/versions", headers=lecturer)
             assert [item["version_no"] for item in versions.json()] == [2, 1]
+
+            comparison = client.get(
+                f"/api/documents/{document_id}/versions/compare?base_version=1&target_version=2",
+                headers=lecturer,
+            )
+            assert comparison.status_code == 200
+            assert comparison.json()["stats"]["added"] == 1
+            assert comparison.json()["stats"]["removed"] == 1
+            assert comparison.json()["base_content"] == "Nội dung riêng của giảng viên."
+            assert comparison.json()["target_content"] == "Nội dung phiên bản thứ hai."
 
             backup = client.post("/api/admin/backups", headers=admin)
             assert backup.status_code == 201
@@ -337,6 +396,13 @@ def test_private_owner_anonymity_and_strict_chatbot_scope():
 
             owner_answer = client.post("/api/search", headers=owner, json={"question": "phản biện chéo đề thi"}).json()
             assert any(item["id"] == "doc-exam-process" for item in owner_answer["citations"])
+            assert all(section in owner_answer["answer"] for section in (
+                "### Nội dung trọng tâm",
+                "### Những phần cần chú ý",
+                "### Gợi ý học tập",
+                "### Bạn có thể hỏi tiếp",
+            ))
+            assert not owner_answer["answer"].startswith(("Nguồn tài liệu", "Tóm tắt", "Kết quả"))
 
             pipeline = client.get("/api/rag/pipeline", headers=requester)
             assert pipeline.status_code == 200
@@ -426,3 +492,49 @@ def test_personal_cloud_connections_are_scoped_per_user():
 
             disconnected = client.delete("/api/cloud/connections/google_drive", headers=lecturer)
             assert disconnected.status_code == 200
+
+
+def test_v2_object_refs_outbox_and_exam_publication_policy():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            head = login(client, "TBM01")
+            admin = login(client, "ADMIN")
+
+            created = client.post(
+                "/api/documents",
+                headers=lecturer,
+                json={
+                    "title": "Đề thi cuối kỳ AI",
+                    "doc_type": "Đề thi",
+                    "topic": "Khảo thí",
+                    "visibility": "private",
+                    "content": "Nội dung đề thi V2 cần được bảo mật trước ngày thi.",
+                },
+            )
+            assert created.status_code == 201
+            document_id = created.json()["id"]
+
+            status = client.get("/api/v2/status", headers=admin)
+            assert status.status_code == 200
+            assert status.json()["architecture"] == "v2-hybrid"
+            assert status.json()["capacity_target_gb"] == 100
+            assert status.json()["objects"]
+            assert status.json()["outbox"]
+
+            assert client.get(f"/api/documents/{document_id}", headers=head).status_code == 200
+            assert client.get(f"/api/documents/{document_id}", headers=admin).status_code == 403
+
+            schedule = client.post(
+                f"/api/v2/exams/{document_id}/schedule-publication",
+                headers=head,
+                json={"publish_after": "2020-01-01T00:00:00+00:00"},
+            )
+            assert schedule.status_code == 200
+            assert schedule.json()["classification"] == "confidential"
+
+            published = client.post("/api/v2/exams/process-publications", headers=head)
+            assert published.status_code == 200
+            assert document_id in published.json()["documents"]
+            assert client.get(f"/api/documents/{document_id}", headers=admin).status_code == 200

@@ -112,10 +112,20 @@ class AIProvider:
         if not self.api_key or not contexts:
             return fallback
         context = "\n\n".join(f"[{item['title']}]\n{item['content'][:6000]}" for item in contexts)
+        experience_instructions = """
+Bạn là trợ lý tri thức thân thiện đang trò chuyện trực tiếp với người dùng.
+- Không viết như báo cáo kỹ thuật và không mở đầu bằng "Nguồn tài liệu", "Tóm tắt" hoặc "Kết quả".
+- Dùng câu ngắn, mỗi đoạn tối đa 2-3 dòng; chia thành các khối dễ quét mắt.
+- Dùng markdown và emoji nhẹ. Chỉ dùng bullet ngắn, không tạo danh sách dài liên tục.
+- Highlight ý quan trọng bằng **chữ đậm**.
+- Với tài liệu dài, ưu tiên tổng quan, chủ đề chính, nội dung cần chú ý và gợi ý học tập.
+- Không viết phần nguồn trong câu trả lời; ứng dụng sẽ hiển thị nguồn riêng ở cuối.
+- Luôn kết thúc bằng mục "### Bạn có thể hỏi tiếp" với 3-4 câu hỏi gợi ý ngắn.
+"""
         try:
             return self._response(
-                instructions or "Trả lời bằng tiếng Việt, chỉ dựa trên ngữ cảnh. Nêu tên tài liệu nguồn và không tiết lộ dữ liệu ngoài ngữ cảnh.",
-                f"Ngữ cảnh:\n{context}\n\nCâu hỏi: {question}",
+                f"{experience_instructions}\nChỉ dựa trên ngữ cảnh được cung cấp và không tiết lộ dữ liệu ngoài ngữ cảnh.\nHướng dẫn bổ sung của quản trị viên: {instructions or 'Không có.'}",
+                f"Ngữ cảnh:\n{context}\n\nCâu hỏi của người dùng: {question}",
             )
         except RuntimeError:
             return fallback

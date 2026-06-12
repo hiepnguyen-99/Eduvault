@@ -21,7 +21,12 @@ npm run dev
 ```
 
 Mở `http://localhost:3000`. Frontend mặc định gọi backend tại
-`http://127.0.0.1:8080`; có thể đổi bằng `NEXT_PUBLIC_API_URL`.
+`http://127.0.0.1:8080`.
+
+Trình duyệt mặc định gọi API cùng origin qua `/api`; Next.js proxy request tới
+`BACKEND_URL`. Sao chép `.env.example` thành `.env.local` khi cần đổi địa chỉ
+backend. Chỉ đặt `NEXT_PUBLIC_API_URL` khi trình duyệt phải gọi trực tiếp một
+API public trên domain riêng.
 
 Tài khoản demo: `GV001`, `GVNEW`, `TBM01`, `ADMIN`. Mật khẩu mặc định giống mã
 tài khoản.
@@ -32,6 +37,9 @@ tài khoản.
 npm run build
 npm start
 ```
+
+Production build sử dụng Next.js standalone output để thuận tiện đóng gói
+frontend vào container.
 
 Các route chính: `/`, `/repository`, `/assistant`, `/knowledge-transfer`,
 `/versions`, `/backup`, `/permissions`, `/reports`, `/settings` và

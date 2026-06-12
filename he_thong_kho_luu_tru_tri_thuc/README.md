@@ -1,5 +1,31 @@
 # Hệ thống kho lưu trữ tri thức
 
+## EduVault V2 demo
+
+V2 giữ toàn bộ chức năng MVP cũ và bổ sung kiến trúc hybrid cho một khoa:
+
+- MySQL 8.4 làm system of record; tự chuyển sang SQLite fallback nếu MySQL chưa chạy.
+- MinIO lưu file gốc và version; local object-store làm fallback demo.
+- Qdrant lưu vector; chunk trong database làm fallback.
+- Redis nhận job từ transactional outbox; xử lý đồng bộ làm fallback.
+- Trạng thái xử lý V2, object reference, outbox và chính sách công bố đề thi.
+- Dashboard hiển thị trực tiếp dịch vụ V2 đang hoạt động hay fallback.
+
+Chạy demo nhanh:
+
+```powershell
+.\run_v2_demo.ps1
+```
+
+Chạy đầy đủ MySQL/MinIO/Redis/Qdrant:
+
+```powershell
+docker compose -f docker-compose.v2.yml up -d
+```
+
+Xem [hướng dẫn demo V2](V2_DEMO.md) và
+[kiến trúc V2](eduvault_architecture_flows_v2.md).
+
 ## EduVault MVP hoàn chỉnh
 
 Phiên bản MVP mới sử dụng FastAPI + SQLite và lưu trữ file cục bộ. Hệ thống bao gồm:

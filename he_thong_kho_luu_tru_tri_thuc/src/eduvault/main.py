@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 import html
 import os
+import difflib
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -11,15 +12,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.requests import ClientDisconnect
 
 from .ai import ai_provider
 from .cloud import PROVIDERS, authorization_url, disconnect, exchange_code, list_connections, sync_user_document
 from .database import ROOT, connection, database_backend, hash_secret, init_database, now, rows, transaction
+from .infrastructure import infrastructure_status
 from .services import (
     anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup,
     create_document, extract_text, guess_metadata, index_document, knowledge_summary, list_deleted_documents, list_documents, permanently_delete_document,
     quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
-    soft_delete_document, suggest_folder, sync_document, update_document, usage_report,
+    set_v2_state, soft_delete_document, suggest_folder, sync_document, update_document, usage_report, v2_state_for,
 )
 
 
@@ -35,8 +38,9 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="EduVault API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="EduVault API", version="2.0.0", lifespan=lifespan)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+MAX_AI_ANALYZE_BYTES = int(os.getenv("MAX_AI_ANALYZE_MB", "25")) * 1024 * 1024
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -82,6 +86,10 @@ class TransferInput(BaseModel):
 
 class ProgressInput(BaseModel):
     progress: int = Field(ge=0, le=100)
+
+
+class ExamPublicationInput(BaseModel):
+    publish_after: str = Field(min_length=10, max_length=40)
 
 
 class PolicyInput(BaseModel):
@@ -154,7 +162,28 @@ def health():
         "version": app.version,
         "database": database_backend(),
         "max_upload_mb": MAX_UPLOAD_BYTES // 1024 // 1024,
+        "max_ai_analyze_mb": MAX_AI_ANALYZE_BYTES // 1024 // 1024,
         "ai": ai_provider.status(),
+        "infrastructure": infrastructure_status(),
+    }
+
+
+@app.get("/api/v2/status")
+def v2_status(user: dict = Depends(current_user)):
+    with connection() as db:
+        states = rows(db.execute(
+            "SELECT lifecycle_status,indexing_status,COUNT(*) count FROM document_v2_state GROUP BY lifecycle_status,indexing_status"
+        ).fetchall())
+        outbox = rows(db.execute("SELECT status,COUNT(*) count FROM outbox_events GROUP BY status").fetchall())
+        objects = rows(db.execute("SELECT provider,COUNT(*) count,SUM(size) size FROM object_refs GROUP BY provider").fetchall())
+    return {
+        **infrastructure_status(),
+        "ai": ai_provider.status(),
+        "documents": states,
+        "outbox": outbox,
+        "objects": objects,
+        "scope": "single-faculty",
+        "capacity_target_gb": 100,
     }
 
 
@@ -255,7 +284,10 @@ def dashboard(user: dict = Depends(current_user)):
         return {
             "user": {key: user[key] for key in ("code", "name", "role", "department")},
             "stats": {"documents": len(docs), "private": sum(d["visibility"] == "private" for d in docs), "topics": len({d["topic"] for d in docs})},
-            "documents": anonymize_documents(docs, user),
+            "documents": [
+                {**item, "v2_state": v2_state_for(db, item["id"])}
+                for item in anonymize_documents(docs, user)
+            ],
             "requests": requests,
             "backups": rows(db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()),
             "audit": rows(db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20").fetchall()) if user["role"] == "admin" else [],
@@ -277,11 +309,25 @@ def analyze(payload: AnalyzeInput, user: dict = Depends(current_user)):
 @app.post("/api/documents/analyze-file")
 async def analyze_file(request: Request, x_filename: str = Header(), user: dict = Depends(current_user)):
     from urllib.parse import unquote
-    raw = await request.body()
+    content_length = int(request.headers.get("content-length", "0") or 0)
+    if content_length > MAX_AI_ANALYZE_BYTES:
+        raise HTTPException(
+            413,
+            f"File quá lớn để AI phân tích trực tiếp. Giới hạn hiện tại là {MAX_AI_ANALYZE_BYTES // 1024 // 1024} MB; "
+            "hãy nhập metadata thủ công để lưu file hoặc dùng xử lý nền.",
+        )
+    try:
+        raw = await request.body()
+    except ClientDisconnect:
+        raise HTTPException(400, "Kết nối tải file bị ngắt trước khi hoàn tất. Hãy thử tải lại.")
     if not raw:
         raise HTTPException(400, "File phân tích đang trống.")
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File vượt quá giới hạn 25 MB của MVP.")
+    if len(raw) > MAX_AI_ANALYZE_BYTES:
+        raise HTTPException(
+            413,
+            f"File quá lớn để AI phân tích trực tiếp. Giới hạn hiện tại là {MAX_AI_ANALYZE_BYTES // 1024 // 1024} MB; "
+            "hãy nhập metadata thủ công để lưu file hoặc dùng xử lý nền.",
+        )
     filename = unquote(x_filename)
     content = extract_text(filename, request.headers.get("content-type", "application/octet-stream"), raw)
     with connection() as db:
@@ -364,11 +410,17 @@ async def upload_document(
     user: dict = Depends(current_user),
 ):
     from urllib.parse import unquote
-    raw = await request.body()
+    content_length = int(request.headers.get("content-length", "0") or 0)
+    if content_length > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
+    try:
+        raw = await request.body()
+    except ClientDisconnect:
+        raise HTTPException(400, "Kết nối tải file bị ngắt trước khi hoàn tất. Hãy thử tải lại.")
     if not raw:
         raise HTTPException(400, "File tải lên đang trống.")
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File vượt quá giới hạn 25 MB của MVP.")
+        raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
     payload = {
@@ -399,7 +451,10 @@ async def upload_new_version(
     user: dict = Depends(current_user),
 ):
     from urllib.parse import unquote
-    raw = await request.body()
+    try:
+        raw = await request.body()
+    except ClientDisconnect:
+        raise HTTPException(400, "Kết nối tải file bị ngắt trước khi hoàn tất. Hãy thử tải lại.")
     if not raw:
         raise HTTPException(400, "File tải lên đang trống.")
     if len(raw) > MAX_UPLOAD_BYTES:
@@ -452,6 +507,46 @@ def versions(document_id: str, user: dict = Depends(current_user)):
         return result
 
 
+@app.get("/api/documents/{document_id}/versions/compare")
+def compare_versions(
+    document_id: str,
+    base_version: int,
+    target_version: int,
+    user: dict = Depends(current_user),
+):
+    with connection() as db:
+        document = get_document(db, document_id)
+        if not can_read(db, user, document):
+            raise HTTPException(403, "Bạn không có quyền xem tài liệu.")
+        version_rows = rows(db.execute(
+            "SELECT version_no,storage_path FROM versions WHERE document_id=? AND version_no IN (?,?)",
+            (document_id, base_version, target_version),
+        ).fetchall())
+        paths = {item["version_no"]: item["storage_path"] for item in version_rows}
+        if base_version not in paths or target_version not in paths:
+            raise HTTPException(404, "Không tìm thấy một trong hai phiên bản cần so sánh.")
+        base_content = __import__("pathlib").Path(paths[base_version]).read_text(encoding="utf-8")
+        target_content = __import__("pathlib").Path(paths[target_version]).read_text(encoding="utf-8")
+        changes = []
+        stats = {"added": 0, "removed": 0, "unchanged": 0}
+        for line in difflib.ndiff(base_content.splitlines(), target_content.splitlines()):
+            prefix = line[:2]
+            if prefix == "? ":
+                continue
+            kind = "added" if prefix == "+ " else "removed" if prefix == "- " else "unchanged"
+            stats[kind] += 1
+            changes.append({"kind": kind, "content": line[2:]})
+        return {
+            "document_id": document_id,
+            "base_version": base_version,
+            "target_version": target_version,
+            "stats": stats,
+            "changes": changes,
+            "base_content": base_content,
+            "target_content": target_content,
+        }
+
+
 @app.get("/api/documents/{document_id}/provenance")
 def provenance(document_id: str, user: dict = Depends(current_user)):
     with connection() as db:
@@ -474,6 +569,8 @@ def provenance(document_id: str, user: dict = Depends(current_user)):
             "versions": versions_result,
             "sync_history": rows(db.execute("SELECT * FROM sync_logs WHERE document_id=? ORDER BY created_at DESC", (document_id,)).fetchall()),
             "files": rows(db.execute("SELECT id,version_no,original_name,mime_type,size,created_at FROM file_assets WHERE document_id=? ORDER BY version_no DESC", (document_id,)).fetchall()),
+            "objects": rows(db.execute("SELECT id,version_no,kind,provider,object_uri,checksum,size,created_at FROM object_refs WHERE document_id=? ORDER BY created_at DESC", (document_id,)).fetchall()),
+            "v2_state": v2_state_for(db, document_id),
             "access": access,
         }
 
@@ -619,6 +716,35 @@ def quality(user: dict = Depends(require_roles("head", "admin"))):
         return report
 
 
+@app.post("/api/v2/exams/{document_id}/schedule-publication")
+def schedule_exam_publication(
+    document_id: str, payload: ExamPublicationInput, user: dict = Depends(require_roles("head", "admin"))
+):
+    with transaction() as db:
+        document = get_active_document(db, document_id)
+        db.execute("UPDATE documents SET visibility='private',updated_at=? WHERE id=?", (now(), document_id))
+        state = set_v2_state(
+            db, document_id, classification="confidential", lifecycle_status="published",
+            publish_after=payload.publish_after,
+        )
+        audit(db, user["code"], "exam.publication_scheduled", "document", document_id, {"publish_after": payload.publish_after})
+        return state
+
+
+@app.post("/api/v2/exams/process-publications")
+def process_exam_publications(user: dict = Depends(require_roles("head", "admin"))):
+    with transaction() as db:
+        due = rows(db.execute(
+            "SELECT * FROM document_v2_state WHERE classification='confidential' AND publish_after IS NOT NULL AND publish_after<=?",
+            (now(),),
+        ).fetchall())
+        for state in due:
+            db.execute("UPDATE documents SET visibility='public',updated_at=? WHERE id=?", (now(), state["document_id"]))
+            set_v2_state(db, state["document_id"], classification="public", publish_after=None)
+            audit(db, user["code"], "exam.published", "document", state["document_id"])
+        return {"published": len(due), "documents": [item["document_id"] for item in due]}
+
+
 @app.get("/api/reports/usage")
 def report_usage(user: dict = Depends(require_roles("head", "admin"))):
     with connection() as db:
@@ -737,6 +863,11 @@ def update_policy(key: str, payload: PolicyInput, user: dict = Depends(require_r
     elif key == "ai_prompts":
         if not all(isinstance(payload.value.get(item), str) and len(payload.value[item].strip()) >= 10 for item in ("metadata_instructions", "answer_instructions")):
             raise HTTPException(422, "Prompt AI phải gồm hướng dẫn metadata và hỏi đáp, mỗi prompt tối thiểu 10 ký tự.")
+    elif key == "exam_publication":
+        if payload.value.get("classification_before_exam") != "confidential":
+            raise HTTPException(422, "Đề thi trước ngày thi bắt buộc có classification confidential.")
+        if payload.value.get("publish_after_exam") is not True:
+            raise HTTPException(422, "V2 yêu cầu hỗ trợ công bố đề thi sau ngày thi.")
     with transaction() as db:
         db.execute("INSERT INTO policies(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key, json.dumps(payload.value, ensure_ascii=False), now()))
         audit(db, user["code"], "policy.update", "policy", key)

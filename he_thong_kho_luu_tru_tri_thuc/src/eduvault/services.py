@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 
 from .ai import ai_provider
 from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, now, restore_database, rows, snapshot_database
+from .infrastructure import delete_object, delete_vectors, publish_event, store_object, upsert_vector
 
 
 def audit(db, actor: str, action: str, resource_type: str, resource_id: str | None, detail: dict | None = None):
@@ -26,8 +27,75 @@ def policy_value(db, key: str, fallback: dict) -> dict:
     return json.loads(row["value"]) if row else fallback
 
 
+def v2_state_for(db, document_id: str) -> dict:
+    row = db.execute("SELECT * FROM document_v2_state WHERE document_id=?", (document_id,)).fetchone()
+    return dict(row) if row else {}
+
+
+def set_v2_state(db, document_id: str, **changes) -> dict:
+    current = v2_state_for(db, document_id)
+    state = {
+        "classification": current.get("classification", "private"),
+        "lifecycle_status": current.get("lifecycle_status", "published"),
+        "scan_status": current.get("scan_status", "clean"),
+        "extraction_status": current.get("extraction_status", "completed"),
+        "indexing_status": current.get("indexing_status", "completed"),
+        "publish_after": current.get("publish_after"),
+        **changes,
+    }
+    db.execute(
+        """INSERT INTO document_v2_state(document_id,classification,lifecycle_status,scan_status,extraction_status,indexing_status,publish_after,updated_at)
+           VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(document_id) DO UPDATE SET classification=excluded.classification,lifecycle_status=excluded.lifecycle_status,
+           scan_status=excluded.scan_status,extraction_status=excluded.extraction_status,indexing_status=excluded.indexing_status,
+           publish_after=excluded.publish_after,updated_at=excluded.updated_at""",
+        (
+            document_id, state["classification"], state["lifecycle_status"], state["scan_status"],
+            state["extraction_status"], state["indexing_status"], state["publish_after"], now(),
+        ),
+    )
+    return v2_state_for(db, document_id)
+
+
+def emit_outbox(db, event_type: str, aggregate_id: str, payload: dict) -> dict:
+    event = {
+        "id": f"evt-{uuid.uuid4().hex[:12]}",
+        "event_type": event_type,
+        "aggregate_id": aggregate_id,
+        "payload": payload,
+        "created_at": now(),
+    }
+    published = publish_event(event)
+    db.execute(
+        "INSERT INTO outbox_events(id,event_type,aggregate_id,payload,status,attempts,created_at,published_at) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            event["id"], event_type, aggregate_id, json.dumps(payload, ensure_ascii=False),
+            "published" if published else "processed_sync", 1, event["created_at"], now(),
+        ),
+    )
+    return event
+
+
+def record_object_ref(
+    db, document_id: str, version_no: int, kind: str, object_key: str, raw: bytes, content_type: str
+) -> dict:
+    stored = store_object(object_key, raw, content_type)
+    ref_id = f"obj-{uuid.uuid4().hex[:12]}"
+    db.execute(
+        "INSERT INTO object_refs(id,document_id,version_no,kind,provider,object_uri,object_version,checksum,size,content_type,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            ref_id, document_id, version_no, kind, stored["provider"], stored["object_uri"],
+            stored["object_version"], stored["checksum"], len(raw), content_type, now(),
+        ),
+    )
+    return dict(db.execute("SELECT * FROM object_refs WHERE id=?", (ref_id,)).fetchone())
+
+
 def can_read(db, user: dict, document: dict) -> bool:
     if document["visibility"] == "public" or document["owner_code"] == user["code"]:
+        return True
+    state = v2_state_for(db, document["id"])
+    if state.get("classification") == "confidential" and user["role"] == "head":
         return True
     approved = db.execute(
         "SELECT 1 FROM access_requests WHERE document_id=? AND requester_code=? AND status='approved'",
@@ -79,6 +147,7 @@ def soft_delete_document(db, user: dict, document: dict) -> dict:
     timestamp = now()
     db.execute("UPDATE documents SET deleted_at=?,updated_at=? WHERE id=?", (timestamp, timestamp, document["id"]))
     db.execute("DELETE FROM chunks WHERE document_id=?", (document["id"],))
+    delete_vectors(document["id"])
     audit(db, user["code"], "document.delete", "document", document["id"])
     return {"id": document["id"], "deleted_at": timestamp, "status": "trashed"}
 
@@ -102,7 +171,10 @@ def permanently_delete_document(db, user: dict, document: dict) -> dict:
         raise ValueError("Cần chuyển tài liệu vào thùng rác trước.")
     assets = rows(db.execute("SELECT original_path FROM file_assets WHERE document_id=?", (document["id"],)).fetchall())
     versions = rows(db.execute("SELECT storage_path FROM versions WHERE document_id=?", (document["id"],)).fetchall())
+    objects = rows(db.execute("SELECT object_uri FROM object_refs WHERE document_id=?", (document["id"],)).fetchall())
     db.execute("DELETE FROM chunks WHERE document_id=?", (document["id"],))
+    db.execute("DELETE FROM object_refs WHERE document_id=?", (document["id"],))
+    db.execute("DELETE FROM document_v2_state WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM file_assets WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM versions WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM access_requests WHERE document_id=?", (document["id"],))
@@ -111,6 +183,9 @@ def permanently_delete_document(db, user: dict, document: dict) -> dict:
         path = Path(item.get("original_path") or item.get("storage_path"))
         if path.exists() and path.is_file():
             path.unlink()
+    for item in objects:
+        delete_object(item["object_uri"])
+    delete_vectors(document["id"])
     audit(db, user["code"], "document.purge", "document", document["id"])
     return {"id": document["id"], "status": "deleted_permanently"}
 
@@ -183,6 +258,10 @@ def create_document(db, user: dict, payload: dict) -> dict:
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", doc_id, 1, str(path), digest, user["code"], timestamp),
     )
+    classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
+    set_v2_state(db, doc_id, classification=classification, indexing_status="processing")
+    record_object_ref(db, doc_id, 1, "extracted_text", f"documents/{doc_id}/versions/1/content.txt", content.encode("utf-8"), "text/plain")
+    emit_outbox(db, "document.created", doc_id, {"version_no": 1, "classification": classification})
     audit(db, user["code"], "document.create", "document", doc_id, {"title": payload["title"]})
     index_document(db, doc_id, 1, content)
     sync_document(db, doc_id, path)
@@ -201,6 +280,11 @@ def save_file_asset(db, document_id: str, version_no: int, filename: str, mime_t
         "INSERT INTO file_assets VALUES(?,?,?,?,?,?,?,?)",
         (asset_id, document_id, version_no, filename, str(path), mime_type, len(raw), now()),
     )
+    record_object_ref(
+        db, document_id, version_no, "original",
+        f"documents/{document_id}/versions/{version_no}/original/{safe_name}", raw, mime_type,
+    )
+    emit_outbox(db, "document.original_stored", document_id, {"version_no": version_no, "filename": filename})
     return dict(db.execute("SELECT * FROM file_assets WHERE id=?", (asset_id,)).fetchone())
 
 
@@ -258,6 +342,10 @@ def update_document(db, user: dict, document: dict, payload: dict) -> dict:
         "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=? WHERE id=?",
         (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, document["id"]),
     )
+    classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
+    set_v2_state(db, document["id"], classification=classification, indexing_status="processing")
+    record_object_ref(db, document["id"], version, "extracted_text", f"documents/{document['id']}/versions/{version}/content.txt", content.encode("utf-8"), "text/plain")
+    emit_outbox(db, "document.version_created", document["id"], {"version_no": version})
     audit(db, user["code"], "document.update", "document", document["id"], {"version": version})
     index_document(db, document["id"], version, content)
     sync_document(db, document["id"], path)
@@ -307,10 +395,22 @@ def ask(db, user: dict, question: str) -> dict:
         matches = scored[:3]
     audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "public_or_owned"})
     if not matches:
-        return {"answer": "Không tìm thấy thông tin phù hợp trong phạm vi bạn được phép truy cập.", "citations": []}
-    fallback = "Dựa trên kho tri thức: " + " ".join(item[2] for item in matches[:2])
+        return {
+            "answer": (
+                "Mình chưa tìm thấy nội dung phù hợp trong những tài liệu bạn được phép xem.\n\n"
+                "Bạn có thể thử dùng **tên học phần**, **chủ đề**, hoặc một cụm từ cụ thể hơn.\n\n"
+                "### Bạn có thể hỏi tiếp\n\n"
+                "- Tìm tài liệu theo chủ đề\n"
+                "- Giải thích một thuật ngữ cụ thể\n"
+                "- Liệt kê tài liệu tôi có thể xem"
+            ),
+            "citations": [],
+            "scope": "public_or_owned",
+        }
+    fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
     answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, prompts.get("answer_instructions"))
+    answer = ensure_conversational_format(answer, question)
     return {
         "answer": answer,
         "citations": [{"id": d["id"], "title": d["title"], "topic": d["topic"], "version": d["current_version"], "visibility": d["visibility"]} for _, d, _ in matches],
@@ -319,8 +419,76 @@ def ask(db, user: dict, question: str) -> dict:
     }
 
 
+def conversational_fallback(question: str, matches: list[tuple]) -> str:
+    highlights = []
+    for _, document, content in matches[:3]:
+        sentences = [
+            part.strip()
+            for part in re.split(r"\n+|(?<=[.!?])\s+", content)
+            if part.strip() and not part.strip().startswith("[")
+        ]
+        detail = sentences[0][:240] if sentences else f"Tài liệu tập trung vào {document['topic']}."
+        highlights.append((document["title"], detail))
+
+    topic_lines = "\n\n".join(
+        f"- **{title}**: {detail}" for title, detail in highlights
+    )
+    attention = "\n\n".join(
+        f"⚠️ Chú ý phần **{document['topic']}** trong tài liệu *{document['title']}*."
+        for _, document, _ in matches[:2]
+    )
+    return (
+        "📚 Mình đã đọc các tài liệu liên quan và đây là phần hữu ích nhất cho câu hỏi của bạn.\n\n"
+        "### Nội dung trọng tâm\n\n"
+        f"{topic_lines}\n\n"
+        "### Những phần cần chú ý\n\n"
+        f"{attention}\n\n"
+        "### Gợi ý học tập\n\n"
+        "✅ Đọc lần lượt từng ý trọng tâm, sau đó tự diễn giải lại bằng lời của bạn.\n\n"
+        f"✅ Đối chiếu các ý trên với câu hỏi **{question.strip()}** để xác định phần cần đào sâu.\n\n"
+        "### Bạn có thể hỏi tiếp\n\n"
+        "- Giải thích kỹ hơn từng ý\n"
+        "- Tạo câu hỏi ôn tập từ nội dung này\n"
+        "- So sánh các tài liệu liên quan\n"
+        "- Đề xuất lộ trình học"
+    )
+
+
+def ensure_conversational_format(answer: str, question: str) -> str:
+    cleaned = re.split(
+        r"\n#{0,3}\s*(?:📄\s*)?(?:Nguồn tham khảo|Nguồn tài liệu|Tài liệu tham khảo)\s*:?",
+        answer.strip(),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    required = (
+        "### Nội dung trọng tâm",
+        "### Những phần cần chú ý",
+        "### Gợi ý học tập",
+        "### Bạn có thể hỏi tiếp",
+    )
+    if all(section in cleaned for section in required):
+        return cleaned
+    return (
+        "📚 Mình đã đọc tài liệu và chọn ra những ý hữu ích nhất cho bạn.\n\n"
+        "### Nội dung trọng tâm\n\n"
+        f"{cleaned}\n\n"
+        "### Những phần cần chú ý\n\n"
+        "⚠️ Hãy đối chiếu các ý trên với **ngữ cảnh và phạm vi áp dụng** trong tài liệu.\n\n"
+        "### Gợi ý học tập\n\n"
+        f"✅ Thử diễn giải lại câu trả lời cho câu hỏi **{question.strip()}** bằng lời của bạn.\n\n"
+        "✅ Chọn một phần chưa rõ và hỏi sâu hơn thay vì đọc lại toàn bộ.\n\n"
+        "### Bạn có thể hỏi tiếp\n\n"
+        "- Giải thích kỹ hơn một phần\n"
+        "- Tạo câu hỏi ôn tập từ nội dung này\n"
+        "- So sánh các tài liệu liên quan\n"
+        "- Đề xuất nội dung nên học tiếp"
+    )
+
+
 def index_document(db, document_id: str, version_no: int, content: str, force_local: bool = False) -> None:
     db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
+    delete_vectors(document_id)
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n|(?<=[.!?])\s+", content) if part.strip()]
     chunks = []
     current = ""
@@ -333,21 +501,27 @@ def index_document(db, document_id: str, version_no: int, content: str, force_lo
     if current:
         chunks.append(current)
     for chunk in chunks[:100]:
+        chunk_id = f"chunk-{uuid.uuid4().hex[:12]}"
+        vector = ai_provider.embed(chunk, force_local=force_local)
+        indexed_external = upsert_vector(
+            chunk_id, vector, {"document_id": document_id, "version_no": version_no}
+        )
         db.execute(
             "INSERT INTO chunks VALUES(?,?,?,?,?,?,?)",
             (
-                f"chunk-{uuid.uuid4().hex[:12]}", document_id, version_no, chunk,
-                json.dumps(ai_provider.embed(chunk, force_local=force_local)),
-                "local" if force_local else ai_provider.mode, now(),
+                chunk_id, document_id, version_no, chunk, json.dumps(vector),
+                "qdrant" if indexed_external else ("local" if force_local else ai_provider.mode), now(),
             ),
         )
+    set_v2_state(db, document_id, indexing_status="completed")
+    emit_outbox(db, "document.indexed", document_id, {"version_no": version_no, "chunks": len(chunks[:100])})
 
 
 def create_backup(db, user: dict) -> dict:
     backup_id = f"backup-{uuid.uuid4().hex[:10]}"
     target = BACKUP_DIR / backup_id
     target.mkdir(parents=True)
-    database_file = target / ("eduvault.db" if database_backend() == "sqlite" else "eduvault.mysql.json")
+    database_file = target / ("eduvault.mysql.json" if database_backend() == "mysql" else "eduvault.db")
     snapshot_database(db, database_file)
     shutil.copytree(STORAGE_DIR, target / "storage")
     db.execute("INSERT INTO backup_logs VALUES(?,?,?,?,?)", (backup_id, str(target), "success", user["code"], now()))
@@ -360,7 +534,7 @@ def restore_backup(db, user: dict, backup_id: str) -> dict:
     if not backup:
         raise ValueError("Không tìm thấy bản backup hợp lệ.")
     source_dir = Path(backup["storage_path"])
-    source_db = source_dir / ("eduvault.db" if database_backend() == "sqlite" else "eduvault.mysql.json")
+    source_db = source_dir / ("eduvault.mysql.json" if database_backend() == "mysql" else "eduvault.db")
     source_storage = source_dir / "storage"
     if not source_db.exists() or not source_storage.exists():
         raise ValueError("Bản backup thiếu database hoặc storage.")
@@ -368,7 +542,7 @@ def restore_backup(db, user: dict, backup_id: str) -> dict:
     safety_id = f"pre-restore-{uuid.uuid4().hex[:8]}"
     safety_dir = BACKUP_DIR / safety_id
     safety_dir.mkdir(parents=True)
-    safety_db = safety_dir / ("eduvault.db" if database_backend() == "sqlite" else "eduvault.mysql.json")
+    safety_db = safety_dir / ("eduvault.mysql.json" if database_backend() == "mysql" else "eduvault.db")
     snapshot_database(db, safety_db)
     shutil.copytree(STORAGE_DIR, safety_dir / "storage")
 
