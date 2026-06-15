@@ -100,7 +100,11 @@ export async function api<T>(path: string, options: RequestInit = {}, token?: st
     let message = `Máy chủ trả về lỗi HTTP ${response.status}.`;
     try {
       const data = await response.json();
-      message = data.detail || data.error || message;
+      if (Array.isArray(data.detail)) {
+        message = data.detail.map((e: { msg: string }) => e.msg).join(", ");
+      } else {
+        message = data.detail || data.error || message;
+      }
     } catch {}
     throw new ApiError(response.status, message);
   }

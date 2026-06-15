@@ -13,7 +13,8 @@ const roleLabels: Record<string, string> = { lecturer: "Giảng viên", new_lect
 const roleBadge: Record<string, string> = { lecturer: "badge-green", new_lecturer: "badge-amber", head: "badge-blue", admin: "badge-red" };
 
 function randomCode(name: string) {
-  const initials = name.trim().split(/\s+/).map(w => w[0]?.toUpperCase() || "").join("").slice(0, 3);
+  const ascii = name.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[đĐ]/g, "D");
+  const initials = ascii.trim().split(/\s+/).map(w => w[0]?.toUpperCase() || "").filter(c => /[A-Z]/.test(c)).join("").slice(0, 3);
   const num = String(Math.floor(Math.random() * 900) + 100);
   return (initials || "USR") + num;
 }
