@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, LoaderCircle, ShieldCheck, UserCheck, UserMinus, UserPlus, Users, X } from "lucide-react";
+import { CheckCircle2, LoaderCircle, Pencil, ShieldCheck, UserCheck, UserMinus, UserPlus, Users, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { useBackendData } from "@/lib/hooks";
 import { PageHeader, Panel } from "@/components/ui";
@@ -95,11 +95,17 @@ function ApproveModal({ req, onClose, onDone }: { req: AccountRequest; onClose: 
 
 function CreateUserModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const { request } = useAuth();
-  const [form, setForm] = useState({ code: "", name: "", password: "", role: "lecturer", department: "" });
+  const [form, setForm] = useState({ code: randomCode(""), name: "", password: "", role: "lecturer", department: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  function set(key: string, value: string) { setForm(f => ({ ...f, [key]: value })); }
+  function set(key: string, value: string) {
+    setForm(f => {
+      const updated = { ...f, [key]: value };
+      if (key === "name") updated.code = randomCode(value);
+      return updated;
+    });
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -123,11 +129,14 @@ function CreateUserModal({ onClose, onDone }: { onClose: () => void; onDone: () 
           <button onClick={onClose} className="icon-btn"><X size={16}/></button>
         </div>
         <form className="p-5 space-y-3" onSubmit={submit}>
-          <label className="block text-xs font-bold">Mã tài khoản <span className="text-red-500">*</span>
-            <input className="field mt-1 uppercase" required value={form.code} onChange={e => set("code", e.target.value.toUpperCase())} placeholder="VD: GV010"/>
-          </label>
           <label className="block text-xs font-bold">Họ tên <span className="text-red-500">*</span>
             <input className="field mt-1" required value={form.name} onChange={e => set("name", e.target.value)} placeholder="Nguyễn Văn A"/>
+          </label>
+          <label className="block text-xs font-bold">Mã tài khoản <span className="text-red-500">*</span>
+            <div className="mt-1 flex gap-2">
+              <input className="field flex-1 uppercase" required value={form.code} onChange={e => setForm(f => ({ ...f, code: e.target.value.toUpperCase() }))}/>
+              <button type="button" className="btn-secondary shrink-0 text-xs" onClick={() => setForm(f => ({ ...f, code: randomCode(f.name) }))}>Đổi mã</button>
+            </div>
           </label>
           <label className="block text-xs font-bold">Mật khẩu <span className="text-red-500">*</span>
             <input className="field mt-1" required minLength={4} value={form.password} onChange={e => set("password", e.target.value)}/>
@@ -156,11 +165,76 @@ function CreateUserModal({ onClose, onDone }: { onClose: () => void; onDone: () 
   );
 }
 
+function EditUserModal({ u, onClose, onDone }: { u: User; onClose: () => void; onDone: () => void }) {
+  const { request } = useAuth();
+  const [form, setForm] = useState({ name: u.name, role: u.role, department: u.department, active: Boolean(u.active) });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  function set(key: string, value: string | boolean) { setForm(f => ({ ...f, [key]: value })); }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      await request(`/api/admin/users/${u.code}`, { method: "PUT", body: JSON.stringify(form) });
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Lỗi cập nhật.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="app-card w-full max-w-md" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-4">
+          <div>
+            <p className="eyebrow">Chỉnh sửa tài khoản</p>
+            <h2 className="mt-0.5 text-sm font-bold font-mono">{u.code}</h2>
+          </div>
+          <button onClick={onClose} className="icon-btn"><X size={16}/></button>
+        </div>
+        <form className="p-5 space-y-3" onSubmit={submit}>
+          <label className="block text-xs font-bold">Họ tên <span className="text-red-500">*</span>
+            <input className="field mt-1" required value={form.name} onChange={e => set("name", e.target.value)}/>
+          </label>
+          <label className="block text-xs font-bold">Bộ môn <span className="text-red-500">*</span>
+            <input className="field mt-1" required value={form.department} onChange={e => set("department", e.target.value)}/>
+          </label>
+          <label className="block text-xs font-bold">Vai trò
+            <select className="field mt-1" value={form.role} onChange={e => set("role", e.target.value)}>
+              <option value="lecturer">Giảng viên</option>
+              <option value="new_lecturer">Giảng viên mới</option>
+              <option value="head">Trưởng bộ môn</option>
+              <option value="admin">Quản trị viên</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-xs font-bold cursor-pointer">
+            <input type="checkbox" checked={form.active} onChange={e => set("active", e.target.checked)} className="h-4 w-4 rounded"/>
+            Tài khoản đang hoạt động
+          </label>
+          {error && <p className="rounded bg-red-50 p-2 text-xs text-red-700">{error}</p>}
+          <div className="flex gap-2 pt-1">
+            <button type="button" className="btn-secondary flex-1" onClick={onClose}>Hủy</button>
+            <button className="btn-primary flex-1" disabled={loading}>
+              {loading ? <LoaderCircle className="animate-spin" size={14}/> : <Pencil size={14}/>}Lưu thay đổi
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function UsersPage() {
   const { user, request } = useAuth();
   const { data: users, reload: reloadUsers } = useBackendData<User[]>("/api/admin/users", []);
   const { data: requests, reload: reloadRequests } = useBackendData<AccountRequest[]>("/api/admin/account-requests", []);
   const [approving, setApproving] = useState<AccountRequest | null>(null);
+  const [editing, setEditing] = useState<User | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -237,11 +311,16 @@ export default function UsersPage() {
                     </span>
                   </td>
                   <td>
-                    {u.code !== user?.code && (
-                      <button className="btn-secondary text-xs" onClick={() => toggleActive(u.code, u)}>
-                        {u.active ? "Khóa" : "Mở khóa"}
+                    <div className="flex gap-2">
+                      <button className="btn-secondary text-xs" onClick={() => setEditing(u)}>
+                        <Pencil size={12}/>Sửa
                       </button>
-                    )}
+                      {u.code !== user?.code && (
+                        <button className="btn-secondary text-xs" onClick={() => toggleActive(u.code, u)}>
+                          {u.active ? "Khóa" : "Mở khóa"}
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -275,6 +354,9 @@ export default function UsersPage() {
       )}
       {showCreate && (
         <CreateUserModal onClose={() => setShowCreate(false)} onDone={() => { setShowCreate(false); setMessage("Tạo tài khoản thành công!"); reloadUsers(); }}/>
+      )}
+      {editing && (
+        <EditUserModal u={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); setMessage("Đã cập nhật tài khoản!"); reloadUsers(); }}/>
       )}
     </div>
   );
