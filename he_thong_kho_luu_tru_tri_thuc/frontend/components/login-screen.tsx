@@ -11,7 +11,7 @@ const ROLES = [
 ];
 
 function RequestModal({ onClose }: { onClose: () => void }) {
-  const [form, setForm] = useState({ full_name: "", email: "", department: "", reason: "", requested_role: "lecturer" });
+  const [form, setForm] = useState({ full_name: "", email: "", department: "", reason: "Đăng ký tài khoản", requested_role: "lecturer" });
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
@@ -79,10 +79,6 @@ function RequestModal({ onClose }: { onClose: () => void }) {
               <select className="field mt-1" value={form.requested_role} onChange={e => set("requested_role", e.target.value)}>
                 {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
               </select>
-            </label>
-            <label className="block text-xs font-bold">
-              Lý do đăng ký <span className="text-red-500">*</span>
-              <textarea className="field mt-1 h-20 resize-none" required minLength={10} value={form.reason} onChange={e => set("reason", e.target.value)} placeholder="Tôi là giảng viên bộ môn... cần truy cập để..."/>
             </label>
             {error && <p className="rounded bg-red-50 p-2 text-xs text-red-700">{error}</p>}
             <div className="flex gap-2 pt-1">
