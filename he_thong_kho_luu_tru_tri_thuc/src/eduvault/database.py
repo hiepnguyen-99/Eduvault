@@ -235,6 +235,13 @@ CREATE TABLE IF NOT EXISTS object_refs (
   content_type TEXT NOT NULL, created_at TEXT NOT NULL,
   FOREIGN KEY(document_id) REFERENCES documents(id)
 );
+CREATE TABLE IF NOT EXISTS account_requests (
+  id TEXT PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL,
+  department TEXT NOT NULL, reason TEXT NOT NULL,
+  requested_role TEXT NOT NULL DEFAULT 'lecturer',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT
+);
 CREATE TABLE IF NOT EXISTS outbox_events (
   id TEXT PRIMARY KEY, event_type TEXT NOT NULL, aggregate_id TEXT NOT NULL,
   payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',

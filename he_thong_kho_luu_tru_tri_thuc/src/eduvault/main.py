@@ -111,6 +111,20 @@ class UserUpdate(BaseModel):
     active: bool = True
 
 
+class AccountRequestInput(BaseModel):
+    full_name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=5, max_length=120)
+    department: str = Field(min_length=2, max_length=120)
+    reason: str = Field(min_length=10, max_length=500)
+    requested_role: Literal["lecturer", "new_lecturer"] = "lecturer"
+
+
+class ApproveRequestInput(BaseModel):
+    code: str = Field(min_length=3, max_length=30, pattern=r"^[A-Za-z0-9_-]+$")
+    password: str = Field(min_length=4, max_length=200)
+    role: Literal["lecturer", "new_lecturer", "head", "admin"] = "lecturer"
+
+
 class StorageInput(BaseModel):
     name: str
     provider: Literal["local", "google_drive", "onedrive", "sharepoint"]
@@ -827,6 +841,53 @@ def update_user(code: str, payload: UserUpdate, user: dict = Depends(require_rol
         db.execute("UPDATE users SET name=?,role=?,department=?,active=? WHERE code=?", (payload.name, payload.role, payload.department, int(payload.active), code.upper()))
         audit(db, user["code"], "user.update", "user", code.upper())
         return {"code": code.upper(), **payload.model_dump()}
+
+
+@app.post("/api/account-requests", status_code=201)
+def submit_account_request(payload: AccountRequestInput):
+    req_id = f"req-{secrets.token_hex(6)}"
+    with transaction() as db:
+        db.execute(
+            "INSERT INTO account_requests VALUES(?,?,?,?,?,?,?,?,NULL,NULL)",
+            (req_id, payload.full_name, payload.email, payload.department, payload.reason, payload.requested_role, "pending", now()),
+        )
+    return {"id": req_id, "status": "pending"}
+
+
+@app.get("/api/admin/account-requests")
+def list_account_requests(user: dict = Depends(require_roles("admin"))):
+    with connection() as db:
+        return rows(db.execute("SELECT * FROM account_requests ORDER BY created_at DESC").fetchall())
+
+
+@app.put("/api/admin/account-requests/{req_id}/approve")
+def approve_account_request(req_id: str, payload: ApproveRequestInput, user: dict = Depends(require_roles("admin"))):
+    with transaction() as db:
+        req = db.execute("SELECT * FROM account_requests WHERE id=?", (req_id,)).fetchone()
+        if not req:
+            raise HTTPException(404, "Yêu cầu không tồn tại.")
+        if req["status"] != "pending":
+            raise HTTPException(400, "Yêu cầu đã được xử lý rồi.")
+        code = payload.code.upper()
+        try:
+            db.execute("INSERT INTO users VALUES(?,?,?,?,?,1)", (code, req["full_name"], payload.role, req["department"], hash_secret(payload.password)))
+        except Exception:
+            raise HTTPException(409, "Mã người dùng đã tồn tại.")
+        db.execute("UPDATE account_requests SET status='approved',reviewed_at=?,reviewed_by=? WHERE id=?", (now(), user["code"], req_id))
+        audit(db, user["code"], "user.create", "user", code)
+    return {"status": "approved", "code": code}
+
+
+@app.put("/api/admin/account-requests/{req_id}/reject")
+def reject_account_request(req_id: str, user: dict = Depends(require_roles("admin"))):
+    with transaction() as db:
+        req = db.execute("SELECT * FROM account_requests WHERE id=?", (req_id,)).fetchone()
+        if not req:
+            raise HTTPException(404, "Yêu cầu không tồn tại.")
+        if req["status"] != "pending":
+            raise HTTPException(400, "Yêu cầu đã được xử lý rồi.")
+        db.execute("UPDATE account_requests SET status='rejected',reviewed_at=?,reviewed_by=? WHERE id=?", (now(), user["code"], req_id))
+    return {"status": "rejected"}
 
 
 @app.get("/api/admin/policies")

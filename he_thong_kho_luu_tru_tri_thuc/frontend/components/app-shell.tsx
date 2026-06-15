@@ -3,14 +3,14 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Bell, BookOpenCheck, Bot, ChartNoAxesCombined, DatabaseBackup, File, FileClock, FolderKanban, GraduationCap, KeyRound, LoaderCircle, LogOut, Menu, Moon, Search, Send, Settings, Sparkles, Sun, X } from "lucide-react";
+import { Bell, BookOpenCheck, Bot, ChartNoAxesCombined, DatabaseBackup, File, FileClock, FolderKanban, GraduationCap, KeyRound, LoaderCircle, LogOut, Menu, Moon, Search, Send, Settings, Sparkles, Sun, Users, X } from "lucide-react";
 import { navItems } from "@/lib/data";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { LoginScreen } from "@/components/login-screen";
 import { Document } from "@/lib/api";
 import { useBackendData } from "@/lib/hooks";
 
-const icons = [ChartNoAxesCombined, FolderKanban, Bot, GraduationCap, FileClock, DatabaseBackup, KeyRound, ChartNoAxesCombined, Settings];
+const icons = [ChartNoAxesCombined, FolderKanban, Bot, GraduationCap, FileClock, DatabaseBackup, KeyRound, ChartNoAxesCombined, Users, Settings];
 const roleLabels = { lecturer: "Giảng viên", new_lecturer: "Giảng viên mới", head: "Trưởng bộ môn", admin: "Quản trị viên" };
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -51,7 +51,8 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
       </div>
       <nav className="p-3 space-y-1 flex-1" aria-label="Điều hướng chính">
         <p className="px-3 py-2 text-[10px] font-bold uppercase tracking-[.16em] text-blue-200/60">Không gian làm việc</p>
-        {navItems.map(([label, href], index) => {
+        {navItems.map(([label, href, requiredRole], index) => {
+          if (requiredRole && user?.role !== requiredRole) return null;
           const Icon = icons[index];
           const active = path === href;
           return <Link key={href} href={href} onClick={()=>setMobile(false)} className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-semibold transition ${active ? "bg-blue-500 text-white shadow-lg shadow-blue-950/20" : "text-blue-100/75 hover:bg-white/8 hover:text-white"}`}><Icon size={17}/>{label}</Link>
