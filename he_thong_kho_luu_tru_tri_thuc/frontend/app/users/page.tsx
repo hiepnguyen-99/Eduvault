@@ -12,9 +12,15 @@ type AccountRequest = { id: string; full_name: string; email: string; department
 const roleLabels: Record<string, string> = { lecturer: "Giảng viên", new_lecturer: "Giảng viên mới", head: "Trưởng bộ môn", admin: "Quản trị viên" };
 const roleBadge: Record<string, string> = { lecturer: "badge-green", new_lecturer: "badge-amber", head: "badge-blue", admin: "badge-red" };
 
+function randomCode(name: string) {
+  const initials = name.trim().split(/\s+/).map(w => w[0]?.toUpperCase() || "").join("").slice(0, 3);
+  const num = String(Math.floor(Math.random() * 900) + 100);
+  return (initials || "USR") + num;
+}
+
 function ApproveModal({ req, onClose, onDone }: { req: AccountRequest; onClose: () => void; onDone: () => void }) {
   const { request } = useAuth();
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(() => randomCode(req.full_name));
   const [password, setPassword] = useState("");
   const [role, setRole] = useState(req.requested_role);
   const [loading, setLoading] = useState(false);
@@ -55,7 +61,10 @@ function ApproveModal({ req, onClose, onDone }: { req: AccountRequest; onClose: 
         <form className="p-5 space-y-3" onSubmit={approve}>
           <label className="block text-xs font-bold">
             Mã tài khoản <span className="text-red-500">*</span>
-            <input className="field mt-1 uppercase" required value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="VD: GV010"/>
+            <div className="mt-1 flex gap-2">
+              <input className="field flex-1 uppercase" required value={code} onChange={e => setCode(e.target.value.toUpperCase())}/>
+              <button type="button" className="btn-secondary shrink-0 text-xs" onClick={() => setCode(randomCode(req.full_name))}>Đổi mã</button>
+            </div>
           </label>
           <label className="block text-xs font-bold">
             Mật khẩu ban đầu <span className="text-red-500">*</span>
