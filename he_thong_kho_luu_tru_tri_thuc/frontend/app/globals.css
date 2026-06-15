@@ -73,3 +73,18 @@ button { cursor: pointer; }
   .desktop-sidebar { display:none; }
   .main-offset { margin-left:0 !important; }
 }
+
+.ai-result { font-size: 0.875rem; line-height: 1.7; color: var(--text); }
+.ai-result h1, .ai-result h2, .ai-result h3 { font-weight: 700; margin-top: 1.25rem; margin-bottom: 0.4rem; color: var(--text); }
+.ai-result h1 { font-size: 1.1rem; }
+.ai-result h2 { font-size: 1rem; }
+.ai-result h3 { font-size: 0.9rem; }
+.ai-result p { margin-bottom: 0.6rem; }
+.ai-result ul, .ai-result ol { padding-left: 1.4rem; margin-bottom: 0.6rem; }
+.ai-result ul { list-style-type: disc; }
+.ai-result ol { list-style-type: decimal; }
+.ai-result li { margin-bottom: 0.25rem; }
+.ai-result strong { font-weight: 600; }
+.ai-result em { font-style: italic; }
+.ai-result code { background: var(--soft, #f1f5f9); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.8rem; }
+.ai-result blockquote { border-left: 3px solid var(--blue); padding-left: 0.75rem; color: var(--muted); margin: 0.5rem 0; }
