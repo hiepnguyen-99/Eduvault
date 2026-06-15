@@ -110,13 +110,9 @@ def list_documents(db, user: dict) -> list[dict]:
 
 
 def rag_documents(db, user: dict) -> list[dict]:
-    """Strict chatbot scope: public documents plus documents owned by the asker."""
-    return rows(
-        db.execute(
-            "SELECT * FROM documents WHERE deleted_at IS NULL AND (visibility='public' OR owner_code=?) ORDER BY updated_at DESC",
-            (user["code"],),
-        ).fetchall()
-    )
+    """All documents the user can access, including approved shared docs."""
+    docs = rows(db.execute("SELECT * FROM documents WHERE deleted_at IS NULL ORDER BY updated_at DESC").fetchall())
+    return [doc for doc in docs if can_read(db, user, doc)]
 
 
 def anonymize_document(document: dict, user: dict) -> dict:
@@ -363,9 +359,11 @@ def rollback_document(db, user: dict, document: dict, target: int) -> dict:
 
 
 def ask(db, user: dict, question: str) -> dict:
-    allowed = {document["id"]: document for document in rag_documents(db, user)}
+    allowed = {doc["id"]: doc for doc in rag_documents(db, user)}
+
+    # --- vector retrieval: best chunk per document ---
     query_vectors: dict[str, list[float]] = {}
-    vector_matches = []
+    vec_scores: dict[str, tuple[float, dict, str]] = {}
     for chunk in db.execute("SELECT * FROM chunks").fetchall():
         document = allowed.get(chunk["document_id"])
         if not document:
@@ -373,49 +371,52 @@ def ask(db, user: dict, question: str) -> dict:
         provider = chunk["provider"]
         if provider not in query_vectors:
             query_vectors[provider] = ai_provider.embed(question, force_local=provider == "local")
-        query_vector = query_vectors[provider]
-        vector = json.loads(chunk["vector"])
-        similarity = sum(a * b for a, b in zip(query_vector, vector))
-        vector_matches.append((similarity, document, chunk["content"]))
-    vector_matches.sort(key=lambda item: item[0], reverse=True)
-    if vector_matches and vector_matches[0][0] > 0:
-        matches = vector_matches[:3]
-    else:
-        matches = []
-    words = {word for word in re.findall(r"\w+", question.lower(), re.UNICODE) if len(word) > 2}
-    scored = []
-    for document in allowed.values():
-        content = content_for(db, document)
-        searchable = f"{document['title']} {document['topic']} {document['doc_type']} {content}".lower()
-        score = sum(word in searchable for word in words)
-        if score:
-            scored.append((score, document, content))
+        similarity = sum(a * b for a, b in zip(query_vectors[provider], json.loads(chunk["vector"])))
+        doc_id = document["id"]
+        if doc_id not in vec_scores or similarity > vec_scores[doc_id][0]:
+            vec_scores[doc_id] = (similarity, document, chunk["content"])
+
+    # --- keyword retrieval ---
+    words = {w for w in re.findall(r"\w+", question.lower(), re.UNICODE) if len(w) > 2}
+    kw_scores: dict[str, tuple[float, dict, str]] = {}
+    if words:
+        for document in allowed.values():
+            content = content_for(db, document)
+            searchable = f"{document['title']} {document['topic']} {document['doc_type']} {content}".lower()
+            score = sum(1 for w in words if w in searchable)
+            if score:
+                kw_scores[document["id"]] = (score, document, content)
+
+    # --- hybrid merge (70% vector + 30% keyword) ---
+    max_vec = max((s for s, _, _ in vec_scores.values()), default=1.0) or 1.0
+    max_kw = max((s for s, _, _ in kw_scores.values()), default=1.0) or 1.0
+    merged: list[tuple[float, dict, str]] = []
+    for doc_id in set(vec_scores) | set(kw_scores):
+        v_norm = vec_scores[doc_id][0] / max_vec if doc_id in vec_scores else 0.0
+        k_norm = kw_scores[doc_id][0] / max_kw if doc_id in kw_scores else 0.0
+        hybrid = v_norm * 0.7 + k_norm * 0.3
+        source = vec_scores.get(doc_id) or kw_scores[doc_id]
+        merged.append((hybrid, source[1], source[2]))
+    merged.sort(key=lambda x: x[0], reverse=True)
+    matches = merged[:5]
+
+    audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "accessible"})
     if not matches:
-        scored.sort(key=lambda item: item[0], reverse=True)
-        matches = scored[:3]
-    audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "public_or_owned"})
-    if not matches:
-        return {
-            "answer": (
-                "Mình chưa tìm thấy nội dung phù hợp trong những tài liệu bạn được phép xem.\n\n"
-                "Bạn có thể thử dùng **tên học phần**, **chủ đề**, hoặc một cụm từ cụ thể hơn.\n\n"
-                "### Bạn có thể hỏi tiếp\n\n"
-                "- Tìm tài liệu theo chủ đề\n"
-                "- Giải thích một thuật ngữ cụ thể\n"
-                "- Liệt kê tài liệu tôi có thể xem"
-            ),
-            "citations": [],
-            "scope": "public_or_owned",
-        }
+        return {"answer": "Không tìm thấy thông tin phù hợp trong phạm vi bạn được phép truy cập.", "citations": []}
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
-    answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, prompts.get("answer_instructions"))
+    answer = ai_provider.answer(
+        question,
+        [{"title": doc["title"], "content": content} for _, doc, content in matches],
+        fallback,
+        prompts.get("answer_instructions"),
+    )
     answer = ensure_conversational_format(answer, question)
     return {
         "answer": answer,
         "citations": [{"id": d["id"], "title": d["title"], "topic": d["topic"], "version": d["current_version"], "visibility": d["visibility"]} for _, d, _ in matches],
-        "scope": "public_or_owned",
-        "pipeline": ["parse", "chunk", "embed", "vector_store", "permission_filter", "retrieve", "answer"],
+        "scope": "accessible",
+        "pipeline": ["parse", "chunk_overlap", "embed", "vector_store", "permission_filter", "hybrid_retrieve", "answer"],
     }
 
 
@@ -486,21 +487,37 @@ def ensure_conversational_format(answer: str, question: str) -> str:
     )
 
 
+def _split_chunks(content: str, max_len: int = 1000, overlap: int = 200) -> list[str]:
+    units = [p.strip() for p in re.split(r"\n\s*\n|(?<=[.!?])\s+", content) if p.strip()]
+    if not units:
+        return [content.strip()] if content.strip() else []
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for unit in units:
+        unit_len = len(unit) + 1
+        if current_len + unit_len > max_len and current:
+            chunks.append(" ".join(current))
+            tail: list[str] = []
+            tail_len = 0
+            for part in reversed(current):
+                if tail_len + len(part) + 1 > overlap:
+                    break
+                tail.insert(0, part)
+                tail_len += len(part) + 1
+            current = tail
+            current_len = tail_len
+        current.append(unit)
+        current_len += unit_len
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
+
+
 def index_document(db, document_id: str, version_no: int, content: str, force_local: bool = False) -> None:
     db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
     delete_vectors(document_id)
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n|(?<=[.!?])\s+", content) if part.strip()]
-    chunks = []
-    current = ""
-    for paragraph in paragraphs or [content]:
-        if len(current) + len(paragraph) > 1200 and current:
-            chunks.append(current)
-            current = paragraph
-        else:
-            current = f"{current} {paragraph}".strip()
-    if current:
-        chunks.append(current)
-    for chunk in chunks[:100]:
+    for chunk in _split_chunks(content)[:200]:
         chunk_id = f"chunk-{uuid.uuid4().hex[:12]}"
         vector = ai_provider.embed(chunk, force_local=force_local)
         indexed_external = upsert_vector(
@@ -509,12 +526,13 @@ def index_document(db, document_id: str, version_no: int, content: str, force_lo
         db.execute(
             "INSERT INTO chunks VALUES(?,?,?,?,?,?,?)",
             (
-                chunk_id, document_id, version_no, chunk, json.dumps(vector),
+                chunk_id, document_id, version_no, chunk,
+                json.dumps(vector),
                 "qdrant" if indexed_external else ("local" if force_local else ai_provider.mode), now(),
             ),
         )
     set_v2_state(db, document_id, indexing_status="completed")
-    emit_outbox(db, "document.indexed", document_id, {"version_no": version_no, "chunks": len(chunks[:100])})
+    emit_outbox(db, "document.indexed", document_id, {"version_no": version_no})
 
 
 def create_backup(db, user: dict) -> dict:
@@ -592,7 +610,9 @@ def quality_report(db) -> dict:
     for document in documents:
         hashes.setdefault(document["content_hash"], []).append(document)
     duplicates = [[item["title"] for item in group] for group in hashes.values() if len(group) > 1]
-    stale = [doc for doc in documents if doc["updated_at"] < "2025-06-09"]
+    from datetime import datetime, timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=90)).strftime("%Y-%m-%d")
+    stale = [doc for doc in documents if doc["updated_at"][:10] < cutoff]
     missing = []
     for course in db.execute("SELECT * FROM courses").fetchall():
         required = json.loads(course["required_doc_types"])
