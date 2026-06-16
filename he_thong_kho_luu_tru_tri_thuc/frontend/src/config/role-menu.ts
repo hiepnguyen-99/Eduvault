@@ -52,6 +52,7 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
     "backup.manage",
     "reports.view",
     "audit.view",
+    "chatbot.use",
   ],
   HEAD_OF_DEPARTMENT: [
     "dashboard.view",
@@ -81,8 +82,9 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   ADMIN: [
     { label: "Dashboard", href: "/", permission: "dashboard.view", icon: "dashboard" },
     { label: "Repository", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Trợ lý AI", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
     { label: "Policy", href: "/policy", permission: "policy.manage", icon: "policy" },
-    { label: "Users", href: "/users", permission: "users.manage", icon: "users" },
+    { label: "Quản lý tài khoản", href: "/users", permission: "users.manage", icon: "users" },
     { label: "Permissions", href: "/permissions", permission: "permissions.manage", icon: "permissions" },
     { label: "Backup", href: "/backup", permission: "backup.manage", icon: "backup" },
     { label: "Reports", href: "/reports", permission: "reports.view", icon: "reports" },
