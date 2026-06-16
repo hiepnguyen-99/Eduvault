@@ -8,6 +8,7 @@ import { PageHeader, Panel } from "@/components/ui";
 
 type User = { code: string; name: string; role: string; department: string; active: number };
 type AccountRequest = { id: string; full_name: string; email: string; department: string; reason: string; requested_role: string; status: string; created_at: string };
+type ProfileUpdateRequest = { id: string; user_code: string; new_name: string; new_department: string; reason: string; status: string; created_at: string; current_name: string; current_department: string };
 
 const roleLabels: Record<string, string> = { lecturer: "Giảng viên", new_lecturer: "Giảng viên mới", head: "Trưởng bộ môn", admin: "Quản trị viên" };
 const roleBadge: Record<string, string> = { lecturer: "badge-green", new_lecturer: "badge-amber", head: "badge-blue", admin: "badge-red" };
@@ -233,6 +234,7 @@ export default function UsersPage() {
   const { user, request } = useAuth();
   const { data: users, reload: reloadUsers } = useBackendData<User[]>("/api/admin/users", []);
   const { data: requests, reload: reloadRequests } = useBackendData<AccountRequest[]>("/api/admin/account-requests", []);
+  const { data: profileRequests, reload: reloadProfileRequests } = useBackendData<ProfileUpdateRequest[]>("/api/admin/profile-update-requests", []);
   const [approving, setApproving] = useState<AccountRequest | null>(null);
   const [editing, setEditing] = useState<User | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -250,6 +252,24 @@ export default function UsersPage() {
     await request(`/api/admin/account-requests/${id}/reject`, { method: "PUT" });
     setMessage("Đã từ chối yêu cầu.");
     reloadRequests();
+  }
+
+  async function approveProfile(id: string) {
+    if (!confirm("Phê duyệt cập nhật thông tin này?")) return;
+    try {
+      await request(`/api/admin/profile-update-requests/${id}/approve`, { method: "PUT" });
+      setMessage("Đã phê duyệt. Thông tin người dùng đã được cập nhật.");
+      reloadProfileRequests(); reloadUsers();
+    } catch (err) { setMessage(err instanceof Error ? err.message : "Lỗi khi duyệt."); }
+  }
+
+  async function rejectProfile(id: string) {
+    if (!confirm("Từ chối yêu cầu cập nhật này?")) return;
+    try {
+      await request(`/api/admin/profile-update-requests/${id}/reject`, { method: "PUT" });
+      setMessage("Đã từ chối yêu cầu cập nhật.");
+      reloadProfileRequests();
+    } catch (err) { setMessage(err instanceof Error ? err.message : "Lỗi khi từ chối."); }
   }
 
   async function toggleActive(code: string, u: User) {
@@ -287,6 +307,34 @@ export default function UsersPage() {
                 <div className="flex shrink-0 gap-2">
                   <button className="btn-primary text-xs" onClick={() => setApproving(req)}><UserCheck size={13}/>Duyệt</button>
                   <button className="btn-secondary text-xs text-red-600" onClick={() => reject(req.id)}><UserMinus size={13}/>Từ chối</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {profileRequests.filter(r => r.status === "pending").length > 0 && (
+        <Panel title={`Yêu cầu cập nhật hồ sơ (${profileRequests.filter(r => r.status === "pending").length} chờ duyệt)`} className="mb-5">
+          <div className="divide-y divide-[var(--border)]">
+            {profileRequests.filter(r => r.status === "pending").map(req => (
+              <div key={req.id} className="flex items-start gap-4 p-4">
+                <div className="h-9 w-9 shrink-0 rounded-full bg-blue-100 text-blue-700 grid place-items-center text-xs font-bold">
+                  {req.user_code.slice(0, 2).toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0 text-xs">
+                  <p className="font-bold text-sm">{req.user_code}</p>
+                  <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                    <span className="muted">Tên hiện tại:</span><span>{req.current_name}</span>
+                    <span className="muted">Tên mới:</span><strong>{req.new_name}</strong>
+                    <span className="muted">Bộ môn hiện tại:</span><span>{req.current_department}</span>
+                    <span className="muted">Bộ môn mới:</span><strong>{req.new_department}</strong>
+                  </div>
+                  <p className="muted mt-1">Lý do: {req.reason}</p>
+                </div>
+                <div className="flex shrink-0 flex-col gap-2">
+                  <button className="btn-primary text-xs" onClick={() => approveProfile(req.id)}><UserCheck size={13}/>Duyệt</button>
+                  <button className="btn-secondary text-xs text-red-600" onClick={() => rejectProfile(req.id)}><UserMinus size={13}/>Từ chối</button>
                 </div>
               </div>
             ))}

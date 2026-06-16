@@ -267,6 +267,13 @@ CREATE TABLE IF NOT EXISTS account_requests (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT
 );
+CREATE TABLE IF NOT EXISTS profile_update_requests (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL,
+  new_name TEXT NOT NULL, new_department TEXT NOT NULL,
+  reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 CREATE TABLE IF NOT EXISTS outbox_events (
   id TEXT PRIMARY KEY, event_type TEXT NOT NULL, aggregate_id TEXT NOT NULL,
   payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
