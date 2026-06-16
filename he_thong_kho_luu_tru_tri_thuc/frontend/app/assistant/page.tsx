@@ -19,6 +19,11 @@ type StreamEvent =
 
 const STORAGE_KEY = "eduvault_conversations";
 
+/** Mỗi tài khoản có lịch sử chat riêng: khóa lưu trữ gắn theo mã giảng viên. */
+function convStorageKey(code: string): string {
+  return `${STORAGE_KEY}:${code}`;
+}
+
 function newConv(): Conversation {
   return { id: crypto.randomUUID(), title: "Cuộc hội thoại mới", messages: [], updatedAt: Date.now() };
 }
@@ -122,7 +127,7 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: 
 }
 
 export default function Assistant() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [question, setQuestion] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -131,38 +136,36 @@ export default function Assistant() {
   const [preview, setPreview] = useState<DocPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const initialized = useRef(false);
+  // Khóa lưu trữ riêng cho tài khoản đang đăng nhập; rỗng khi chưa có user.
+  const storageKey = user ? convStorageKey(user.code) : "";
+  // Ghi nhớ lịch sử hiện đang thuộc về tài khoản nào, tránh ghi nhầm khi đổi tài khoản.
+  const loadedKey = useRef("");
 
   useEffect(() => {
+    if (!storageKey) return;
+    let loaded: Conversation[] = [];
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const convs: Conversation[] = JSON.parse(saved);
-        if (convs.length) {
-          setConversations(convs);
-          setActiveId(convs[0].id);
-          initialized.current = true;
-          return;
-        }
-      }
+      const saved = localStorage.getItem(storageKey);
+      if (saved) loaded = JSON.parse(saved);
     } catch { /* ignore */ }
-    const first = newConv();
-    setConversations([first]);
-    setActiveId(first.id);
-    initialized.current = true;
-  }, []);
+    if (!loaded.length) loaded = [newConv()];
+    setConversations(loaded);
+    setActiveId(loaded[0].id);
+    loadedKey.current = storageKey;
+  }, [storageKey]);
 
   useEffect(() => {
-    if (!initialized.current || !conversations.length) return;
+    // Chỉ lưu khi lịch sử đang hiển thị đúng là của tài khoản hiện tại.
+    if (!storageKey || loadedKey.current !== storageKey || !conversations.length) return;
     try {
       // Strip streaming state before saving
       const toSave = conversations.map(c => ({
         ...c,
         messages: c.messages.map(m => ({ ...m, streaming: false, status: undefined })),
       }));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave.slice(0, 30)));
+      localStorage.setItem(storageKey, JSON.stringify(toSave.slice(0, 30)));
     } catch { /* ignore */ }
-  }, [conversations]);
+  }, [conversations, storageKey]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

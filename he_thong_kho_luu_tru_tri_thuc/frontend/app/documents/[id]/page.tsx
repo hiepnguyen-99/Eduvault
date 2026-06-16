@@ -14,6 +14,11 @@ import ReactMarkdown from "react-markdown";
 
 const STORAGE_KEY = "eduvault_conversations";
 
+/** Mỗi tài khoản có lịch sử chat riêng: khóa lưu trữ gắn theo mã giảng viên. */
+function convStorageKey(code: string): string {
+  return `${STORAGE_KEY}:${code}`;
+}
+
 type Provenance = {
   document: Document;
   versions: { id: string; version_no: number; created_by: string; created_at: string }[];
@@ -56,9 +61,11 @@ function CitationToggle({ citations }: { citations: Citation[] }) {
   );
 }
 
-function saveConvToStorage(convId: string, title: string, items: ChatItem[]) {
+function saveConvToStorage(code: string, convId: string, title: string, items: ChatItem[]) {
+  if (!code) return;
+  const key = convStorageKey(code);
   try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const stored = JSON.parse(localStorage.getItem(key) || "[]");
     const msgs = items.map(item => ({
       question: item.question,
       result: { answer: item.answer, citations: item.citations, scope: "accessible" },
@@ -68,13 +75,13 @@ function saveConvToStorage(convId: string, title: string, items: ChatItem[]) {
     if (idx >= 0) stored[idx] = entry;
     else stored.unshift(entry);
     if (stored.length > 30) stored.length = 30;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+    localStorage.setItem(key, JSON.stringify(stored));
   } catch {}
 }
 
 export default function DocumentViewer() {
   const { id } = useParams<{ id: string }>();
-  const { token, request } = useAuth();
+  const { token, request, user } = useAuth();
   const { data, error } = useBackendData<Provenance>(`/api/documents/${id}/provenance`, empty);
 
   const [aiAction, setAiAction] = useState("");
@@ -98,7 +105,7 @@ export default function DocumentViewer() {
       );
       const item: ChatItem = { question: action, answer: r.answer, citations: r.citations, isPreset: true };
       setChat([item]);
-      saveConvToStorage(newId, `${action} · ${data.document.title}`, [item]);
+      saveConvToStorage(user?.code ?? "", newId, `${action} · ${data.document.title}`, [item]);
     } catch (err) {
       setChatError(err instanceof Error ? err.message : "Không thể thực hiện.");
       setConvId(null);
@@ -123,7 +130,7 @@ export default function DocumentViewer() {
       setChat(prev => {
         const updated = [...prev, { question: q, answer: r.answer, citations: r.citations }];
         const title = aiAction ? `${aiAction} · ${data.document.title}` : `Hỏi về ${data.document.title}`;
-        saveConvToStorage(currentId, title, updated);
+        saveConvToStorage(user?.code ?? "", currentId, title, updated);
         return updated;
       });
       setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
