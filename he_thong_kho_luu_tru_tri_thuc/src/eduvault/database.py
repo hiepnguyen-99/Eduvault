@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, doc_type TEXT NOT NULL, topic TEXT NOT NULL,
   owner_code TEXT NOT NULL, visibility TEXT NOT NULL, current_version INTEGER NOT NULL,
   content_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  folder_node_id TEXT,
+  folder_node_id TEXT, status TEXT NOT NULL DEFAULT 'INDEXED',
   FOREIGN KEY(owner_code) REFERENCES users(code)
 );
 CREATE TABLE IF NOT EXISTS versions (
@@ -206,6 +206,15 @@ CREATE TABLE IF NOT EXISTS lecturer_specializations (
   id TEXT PRIMARY KEY, user_code TEXT NOT NULL, specialization_id TEXT NOT NULL, created_at TEXT NOT NULL,
   UNIQUE(user_code, specialization_id),
   FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+);
+CREATE TABLE IF NOT EXISTS lecturer_folder_nodes (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, parent_id TEXT,
+  name TEXT NOT NULL, type TEXT NOT NULL, source_master_node_id TEXT NOT NULL,
+  specialization_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(user_code, source_master_node_id),
+  FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(source_master_node_id) REFERENCES folder_nodes(id),
+  FOREIGN KEY(specialization_id) REFERENCES specializations(id)
 );
 CREATE TABLE IF NOT EXISTS backup_logs (
   id TEXT PRIMARY KEY, storage_path TEXT NOT NULL, status TEXT NOT NULL,
@@ -260,20 +269,6 @@ CREATE TABLE IF NOT EXISTS object_refs (
   content_type TEXT NOT NULL, created_at TEXT NOT NULL,
   FOREIGN KEY(document_id) REFERENCES documents(id)
 );
-CREATE TABLE IF NOT EXISTS account_requests (
-  id TEXT PRIMARY KEY, full_name TEXT NOT NULL, email TEXT NOT NULL,
-  department TEXT NOT NULL, reason TEXT NOT NULL,
-  requested_role TEXT NOT NULL DEFAULT 'lecturer',
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT
-);
-CREATE TABLE IF NOT EXISTS profile_update_requests (
-  id TEXT PRIMARY KEY, user_code TEXT NOT NULL,
-  new_name TEXT NOT NULL, new_department TEXT NOT NULL,
-  reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-  created_at TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT,
-  FOREIGN KEY(user_code) REFERENCES users(code)
-);
 CREATE TABLE IF NOT EXISTS outbox_events (
   id TEXT PRIMARY KEY, event_type TEXT NOT NULL, aggregate_id TEXT NOT NULL,
   payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
@@ -285,6 +280,11 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   metadata TEXT NOT NULL, temp_path TEXT NOT NULL, document_id TEXT, error TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS document_processing_jobs (
+  id TEXT PRIMARY KEY, document_id TEXT NOT NULL, job_type TEXT NOT NULL, status TEXT NOT NULL,
+  created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, error_message TEXT,
+  FOREIGN KEY(document_id) REFERENCES documents(id)
 );
 """
 
@@ -302,6 +302,7 @@ CREATE TABLE IF NOT EXISTS documents (
   owner_code VARCHAR(30) NOT NULL, visibility VARCHAR(20) NOT NULL, current_version INT NOT NULL,
   content_hash VARCHAR(64) NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
   folder_path VARCHAR(1000) NOT NULL DEFAULT '', folder_node_id VARCHAR(64) NULL, deleted_at VARCHAR(40) NULL,
+  status VARCHAR(30) NOT NULL DEFAULT 'INDEXED',
   INDEX idx_documents_hash(content_hash), FOREIGN KEY(owner_code) REFERENCES users(code)
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS versions (
@@ -353,6 +354,15 @@ CREATE TABLE IF NOT EXISTS lecturer_specializations (
   UNIQUE KEY uq_lecturer_specialization(user_code, specialization_id),
   FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(specialization_id) REFERENCES specializations(id)
 ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS lecturer_folder_nodes (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, parent_id VARCHAR(64),
+  name VARCHAR(200) NOT NULL, type VARCHAR(30) NOT NULL, source_master_node_id VARCHAR(64) NOT NULL,
+  specialization_id VARCHAR(64) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'active',
+  created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY uq_lecturer_folder_source(user_code, source_master_node_id),
+  INDEX idx_lecturer_folder_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code),
+  FOREIGN KEY(source_master_node_id) REFERENCES folder_nodes(id), FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS backup_logs ( id VARCHAR(64) PRIMARY KEY, storage_path TEXT NOT NULL, status VARCHAR(30) NOT NULL, created_by VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS courses ( code VARCHAR(30) PRIMARY KEY, name VARCHAR(200) NOT NULL, required_doc_types LONGTEXT NOT NULL ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS transfers (
@@ -391,6 +401,11 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
   INDEX idx_upload_tasks_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code)
 ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS document_processing_jobs (
+  id VARCHAR(64) PRIMARY KEY, document_id VARCHAR(64) NOT NULL, job_type VARCHAR(60) NOT NULL, status VARCHAR(30) NOT NULL,
+  created_at VARCHAR(40) NOT NULL, started_at VARCHAR(40), completed_at VARCHAR(40), error_message TEXT,
+  INDEX idx_processing_jobs_document(document_id), FOREIGN KEY(document_id) REFERENCES documents(id)
+) ENGINE=InnoDB;
 """
 
 
@@ -422,10 +437,14 @@ def init_database() -> None:
                 db.execute("ALTER TABLE documents ADD COLUMN folder_node_id TEXT")
             if "deleted_at" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN deleted_at TEXT")
+            if "status" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN status TEXT NOT NULL DEFAULT 'INDEXED'")
         else:
             doc_columns = {row["Field"] for row in db.execute("SHOW COLUMNS FROM documents").fetchall()}
             if "folder_node_id" not in doc_columns:
                 db.execute("ALTER TABLE documents ADD COLUMN folder_node_id VARCHAR(64) NULL")
+            if "status" not in doc_columns:
+                db.execute("ALTER TABLE documents ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'INDEXED'")
         for code, name, role, department in SEED_USERS:
             db.execute(
                 "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, 1)",
@@ -496,7 +515,7 @@ def init_database() -> None:
             digest = hash_secret(content)
             timestamp = now()
             db.execute(
-                "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '', NULL)",
+                "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id,status) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '', NULL, 'INDEXED')",
                 (doc_id, title, doc_type, topic, owner, visibility, digest, timestamp, timestamp),
             )
             db.execute(
@@ -520,8 +539,8 @@ SNAPSHOT_TABLES = [
     "access_requests", "audit_logs", "policies", "backup_logs", "courses",
     "transfers", "external_storages", "sync_logs", "cloud_connections",
     "oauth_states", "cloud_sync_logs",
-    "document_v2_state", "object_refs", "outbox_events", "upload_tasks",
-    "policy_files", "folder_nodes", "specializations", "lecturer_specializations",
+    "document_v2_state", "object_refs", "outbox_events", "upload_tasks", "document_processing_jobs",
+    "policy_files", "folder_nodes", "specializations", "lecturer_specializations", "lecturer_folder_nodes",
 ]
 
 

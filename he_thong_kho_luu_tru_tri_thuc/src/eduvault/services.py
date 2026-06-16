@@ -16,13 +16,41 @@ from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, no
 from .infrastructure import delete_object, delete_vectors, publish_event, store_object, upsert_vector
 
 
-DEFAULT_POLICY_TREE = {
-    "department": "Khoa CNTT",
-    "specializations": [
-        {"name": "AI Application", "folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
-        {"name": "Machine Learning", "folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
-        {"name": "Data Engineering", "folders": ["De cuong", "Bai giang", "ETL", "De thi"]},
-    ],
+STANDARD_FOLDERS = [
+    "Đề cương môn học",
+    "Bài giảng",
+    "Slide",
+    "Lab",
+    "Bài tập",
+    "Đề thi",
+    "Đáp án",
+    "Tài liệu tham khảo",
+]
+
+DOCUMENT_TYPES = [
+    "Đề cương môn học",
+    "Kế hoạch giảng dạy",
+    "Bài giảng",
+    "Slide",
+    "Giáo trình",
+    "Sách tham khảo",
+    "Lab",
+    "Bài tập",
+    "Đồ án",
+    "Đề thi",
+    "Đáp án",
+    "Ngân hàng câu hỏi",
+    "Nghiên cứu khoa học",
+    "Tài liệu khác",
+]
+
+PROCESSING_JOB_TYPES = ["OCR", "CHUNKING", "EMBEDDING", "INDEXING", "METADATA_EXTRACTION"]
+
+EMPTY_POLICY_TREE = {
+    "faculty": "",
+    "specializations": [],
+    "courses": [],
+    "standard_folders": STANDARD_FOLDERS,
 }
 
 
@@ -38,70 +66,170 @@ def policy_value(db, key: str, fallback: dict) -> dict:
     return json.loads(row["value"]) if row else fallback
 
 
-def _try_parse_yaml_like(text: str) -> dict | None:
-    department = None
+def _clean_node_name(value: object) -> str:
+    name = str(value or "").strip().strip("-•* \t\r\n\"'")
+    name = re.sub(r"\s+", " ", name)
+    if not name:
+        return ""
+    technical = re.fullmatch(r"(node|spec|policy|ls)-[0-9a-fA-F-]+", name)
+    if technical or name.lower() in {"thu muc", "thư mục", "folder", "default", "none", "null"}:
+        return ""
+    return name
+
+
+def _as_list(value: object) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _folder_names(value: object) -> list[str]:
+    names = [_clean_node_name(item) for item in _as_list(value)]
+    return [name for name in names if name]
+
+
+def _course_from_item(item: object, fallback_name: str = "") -> dict | None:
+    if isinstance(item, str):
+        name = _clean_node_name(item)
+        code = ""
+        description = ""
+        folders = STANDARD_FOLDERS
+    elif isinstance(item, dict):
+        name = _clean_node_name(item.get("name") or item.get("title") or item.get("course") or fallback_name)
+        code = _clean_node_name(item.get("code"))
+        description = str(item.get("description") or "").strip()
+        folders = _folder_names(item.get("standard_folders") or item.get("folders") or item.get("folder_names")) or STANDARD_FOLDERS
+    else:
+        return None
+    if not name:
+        return None
+    return {"name": name, "code": code, "description": description, "standard_folders": folders}
+
+
+def normalize_policy_tree(data: dict) -> dict:
+    raw_faculty = data.get("faculty") or data.get("department") or data.get("khoa")
+    faculty_code = ""
+    if isinstance(raw_faculty, dict):
+        faculty = _clean_node_name(raw_faculty.get("name") or raw_faculty.get("title"))
+        faculty_code = _clean_node_name(raw_faculty.get("code"))
+    else:
+        faculty = _clean_node_name(raw_faculty)
+    default_folders = _folder_names(data.get("standard_folders") or data.get("folders")) or STANDARD_FOLDERS
     specializations: list[dict] = []
-    current: dict | None = None
+
+    for item in _as_list(data.get("specializations") or data.get("majors") or data.get("groups")):
+        if not isinstance(item, dict):
+            name = _clean_node_name(item)
+            description = ""
+            courses = []
+        else:
+            name = _clean_node_name(item.get("name") or item.get("title") or item.get("specialization"))
+            description = str(item.get("description") or "").strip()
+            courses = [_course_from_item(course) for course in _as_list(item.get("courses") or item.get("subjects"))]
+            courses = [course for course in courses if course]
+            legacy_folders = _folder_names(item.get("folders") or item.get("standard_folders"))
+            if not courses and name:
+                courses = [{"name": name, "standard_folders": legacy_folders or default_folders}]
+        if name and courses:
+            specializations.append({"name": name, "description": description, "courses": courses})
+
+    loose_courses = [_course_from_item(course) for course in _as_list(data.get("courses"))]
+    loose_courses = [course for course in loose_courses if course]
+    if loose_courses:
+        target_name = _clean_node_name(data.get("specialization") or data.get("group")) or "Chuyên môn chung"
+        existing = next((item for item in specializations if item["name"] == target_name), None)
+        if existing:
+            existing["courses"].extend(loose_courses)
+        else:
+            specializations.append({"name": target_name, "description": "", "courses": loose_courses})
+
+    seen_specs: set[str] = set()
+    clean_specs: list[dict] = []
+    for spec in specializations:
+        spec_key = spec["name"].casefold()
+        if spec_key in seen_specs:
+            continue
+        seen_specs.add(spec_key)
+        seen_courses: set[str] = set()
+        courses = []
+        for course in spec["courses"]:
+            course_key = course["name"].casefold()
+            if course_key in seen_courses:
+                continue
+            seen_courses.add(course_key)
+            folders = _folder_names(course.get("standard_folders")) or default_folders
+            courses.append({
+                "name": course["name"],
+                "code": course.get("code", ""),
+                "description": course.get("description", ""),
+                "standard_folders": folders,
+            })
+        if courses:
+            clean_specs.append({"name": spec["name"], "description": spec.get("description", ""), "courses": courses})
+
+    return {"faculty": faculty, "faculty_code": faculty_code, "specializations": clean_specs, "standard_folders": default_folders}
+
+
+def _try_parse_yaml_like(text: str) -> dict | None:
+    faculty = ""
+    specializations: list[dict] = []
+    current_spec: dict | None = None
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         lowered = line.lower()
-        if lowered.startswith("department:"):
-            department = line.split(":", 1)[1].strip().strip("'\"")
-        elif lowered.startswith("- name:") or lowered.startswith("name:"):
-            if current:
-                specializations.append(current)
-            current = {"name": line.split(":", 1)[1].strip().strip("'\""), "folders": []}
-        elif lowered.startswith("folders:") and current is not None:
-            value = line.split(":", 1)[1].strip()
-            current["folders"] = [item.strip().strip("'\"") for item in value.strip("[]").split(",") if item.strip()]
-        elif line.startswith("-") and current is not None:
-            current.setdefault("folders", []).append(line[1:].strip().strip("'\""))
-    if current:
-        specializations.append(current)
-    if department and specializations:
-        return {"department": department, "specializations": specializations}
+        if lowered.startswith(("faculty:", "department:", "khoa:")):
+            faculty = _clean_node_name(line.split(":", 1)[1])
+        elif lowered.startswith(("specialization:", "nhom chuyen mon:", "nhóm chuyên môn:", "chuyen nganh:", "chuyên ngành:")):
+            if current_spec:
+                specializations.append(current_spec)
+            current_spec = {"name": _clean_node_name(line.split(":", 1)[1]), "courses": []}
+        elif lowered.startswith(("course:", "hoc phan:", "học phần:", "mon hoc:", "môn học:", "- course:", "- hoc phan:", "- học phần:")) and current_spec is not None:
+            current_spec["courses"].append({"name": _clean_node_name(line.split(":", 1)[1]), "standard_folders": STANDARD_FOLDERS})
+        elif line.startswith("-") and current_spec is not None:
+            name = _clean_node_name(line[1:])
+            if name:
+                current_spec["courses"].append({"name": name, "standard_folders": STANDARD_FOLDERS})
+    if current_spec:
+        specializations.append(current_spec)
+    if faculty and specializations:
+        return {"faculty": faculty, "specializations": specializations}
     return None
 
 
 def parse_policy_tree(raw_text: str) -> dict:
     text = raw_text.strip()
     if not text:
-        return DEFAULT_POLICY_TREE
+        raise ValueError("Policy khong co noi dung de sinh Master Folder Tree.")
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         data = _try_parse_yaml_like(text)
     if not data:
+        faculty = ""
         specs: list[dict] = []
-        current_name = ""
-        current_folders: list[str] = []
+        current_spec: dict | None = None
         for raw_line in text.splitlines():
             line = raw_line.strip(" -\t")
             if not line:
                 continue
-            if ":" in line:
+            lowered = line.lower()
+            if any(token in lowered for token in ("khoa", "faculty", "department")) and ":" in line:
                 label, value = line.split(":", 1)
-                if label.strip().lower() in {"department", "khoa"}:
-                    continue
-                if current_name:
-                    specs.append({"name": current_name, "folders": current_folders or DEFAULT_POLICY_TREE["specializations"][0]["folders"]})
-                current_name = label.strip()
-                current_folders = [item.strip() for item in re.split(r",|;", value) if item.strip()]
-        if current_name:
-            specs.append({"name": current_name, "folders": current_folders or DEFAULT_POLICY_TREE["specializations"][0]["folders"]})
-        data = {"department": "Khoa CNTT", "specializations": specs or DEFAULT_POLICY_TREE["specializations"]}
-    department = str(data.get("department") or DEFAULT_POLICY_TREE["department"]).strip()
-    specializations = []
-    for item in data.get("specializations", []):
-        name = str(item.get("name") or "").strip()
-        folders = [str(folder).strip() for folder in item.get("folders", []) if str(folder).strip()]
-        if name:
-            specializations.append({"name": name, "folders": folders or DEFAULT_POLICY_TREE["specializations"][0]["folders"]})
-    if not specializations:
-        specializations = DEFAULT_POLICY_TREE["specializations"]
-    return {"department": department, "specializations": specializations}
+                faculty = _clean_node_name(value or label)
+            elif ":" in line:
+                label, value = line.split(":", 1)
+                if current_spec:
+                    specs.append(current_spec)
+                courses = [_course_from_item(item) for item in re.split(r",|;", value) if _clean_node_name(item)]
+                current_spec = {"name": _clean_node_name(label), "courses": [course for course in courses if course]}
+        if current_spec:
+            specs.append(current_spec)
+        data = {"faculty": faculty, "specializations": specs}
+    parsed = ai_provider.policy_tree(text, normalize_policy_tree(data if isinstance(data, dict) else {}))
+    normalized = normalize_policy_tree(parsed if isinstance(parsed, dict) else {})
+    if not normalized["faculty"] or not normalized["specializations"]:
+        raise ValueError("Không tìm thấy danh sách chuyên môn trong Policy.")
+    return normalized
 
 
 def tree_node_public(row: dict, children: list[dict] | None = None) -> dict:
@@ -125,8 +253,9 @@ def build_tree_from_rows(nodes: list[dict], root_name: str | None = None) -> dic
     for node in nodes:
         parent_id = node.get("parent_id") if node.get("parent_id") in known_ids else None
         by_parent.setdefault(parent_id, []).append(node)
+    type_order = {"faculty": 0, "department": 0, "specialization": 1, "course": 2, "standard_folder": 3, "folder": 3}
     for siblings in by_parent.values():
-        siblings.sort(key=lambda item: (item["type"] != "department", item["name"].lower()))
+        siblings.sort(key=lambda item: (type_order.get(item["type"], 9), item["name"].lower()))
 
     def build(node: dict) -> dict:
         return tree_node_public(node, [build(child) for child in by_parent.get(node["id"], [])])
@@ -166,57 +295,78 @@ def activate_policy_file(db, user: dict, policy_id: str) -> dict:
         raise ValueError("Policy khong ton tai.")
     parsed = json.loads(policy["parsed_json"])
     timestamp = now()
-    previous_nodes = rows(db.execute("SELECT * FROM folder_nodes WHERE status='active'").fetchall())
-    previous_paths = {node["path"] for node in previous_nodes}
-    next_paths: set[str] = set()
     db.execute("UPDATE policy_files SET status='archived' WHERE status='active' AND id<>?", (policy_id,))
     db.execute("UPDATE policy_files SET status='active',activated_at=? WHERE id=?", (timestamp, policy_id))
+    db.execute("UPDATE folder_nodes SET status='deprecated',updated_at=? WHERE status='active'", (timestamp,))
 
-    department_id = f"node-{uuid.uuid4().hex[:12]}"
-    department = parsed["department"]
-    next_paths.add(department)
+    faculty_id = f"node-{uuid.uuid4().hex[:12]}"
+    faculty = parsed["faculty"]
     db.execute(
         "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-        (department_id, policy_id, department, None, "department", department, "active", timestamp, timestamp),
+        (faculty_id, policy_id, faculty, None, "faculty", faculty, "active", timestamp, timestamp),
     )
     for spec in parsed["specializations"]:
         spec_id = f"node-{uuid.uuid4().hex[:12]}"
-        spec_path = f"{department}/{spec['name']}"
-        next_paths.add(spec_path)
+        spec_path = f"{faculty}/{spec['name']}"
         db.execute(
             "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-            (spec_id, policy_id, spec["name"], department_id, "specialization", spec_path, "active", timestamp, timestamp),
+            (spec_id, policy_id, spec["name"], faculty_id, "specialization", spec_path, "active", timestamp, timestamp),
         )
         specialization_id = f"spec-{uuid.uuid4().hex[:12]}"
         db.execute(
             "INSERT INTO specializations(id,name,description,policy_id,folder_node_id) VALUES(?,?,?,?,?)",
-            (specialization_id, spec["name"], "", policy_id, spec_id),
+            (specialization_id, spec["name"], spec.get("description", ""), policy_id, spec_id),
         )
-        for folder in spec["folders"]:
-            folder_id = f"node-{uuid.uuid4().hex[:12]}"
-            folder_path = f"{spec_path}/{folder}"
-            next_paths.add(folder_path)
+        for course in spec["courses"]:
+            course_id = f"node-{uuid.uuid4().hex[:12]}"
+            course_path = f"{spec_path}/{course['name']}"
             db.execute(
                 "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (folder_id, policy_id, folder, spec_id, "folder", folder_path, "active", timestamp, timestamp),
+                (course_id, policy_id, course["name"], spec_id, "course", course_path, "active", timestamp, timestamp),
             )
-    deprecated_paths = previous_paths - next_paths
-    if deprecated_paths:
-        for node in previous_nodes:
-            if node["path"] in deprecated_paths:
-                db.execute("UPDATE folder_nodes SET status='deprecated',updated_at=? WHERE id=?", (timestamp, node["id"]))
-    audit(db, user["code"], "policy_file.activate", "policy", policy_id, {"department": department, "specializations": len(parsed["specializations"])})
+            for folder in course["standard_folders"]:
+                folder_id = f"node-{uuid.uuid4().hex[:12]}"
+                folder_path = f"{course_path}/{folder}"
+                db.execute(
+                    "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (folder_id, policy_id, folder, course_id, "standard_folder", folder_path, "active", timestamp, timestamp),
+                )
+    audit(db, user["code"], "policy_file.activate", "policy", policy_id, {"faculty": faculty, "specializations": len(parsed["specializations"])})
     return policy_public(db.execute("SELECT * FROM policy_files WHERE id=?", (policy_id,)).fetchone())
 
 
 def policy_public(row) -> dict:
     item = dict(row)
-    item["parsed_json"] = json.loads(item["parsed_json"])
+    parsed = json.loads(item["parsed_json"])
+    item["parsed_json"] = normalize_policy_tree(parsed if isinstance(parsed, dict) else {})
     return item
 
 
 def list_policy_files(db) -> list[dict]:
     return [policy_public(row) for row in db.execute("SELECT * FROM policy_files ORDER BY created_at DESC").fetchall()]
+
+
+def delete_policy_file(db, user: dict, policy_id: str) -> dict:
+    policy = db.execute("SELECT * FROM policy_files WHERE id=?", (policy_id,)).fetchone()
+    if not policy:
+        raise ValueError("Policy khong ton tai.")
+    if policy["status"] == "active":
+        raise PermissionError("Không thể xóa policy đang active. Hãy activate policy khác trước.")
+    specs = rows(db.execute("SELECT id FROM specializations WHERE policy_id=?", (policy_id,)).fetchall())
+    spec_ids = [item["id"] for item in specs]
+    if spec_ids:
+        placeholders = ",".join("?" for _ in spec_ids)
+        db.execute(f"DELETE FROM lecturer_folder_nodes WHERE specialization_id IN ({placeholders})", tuple(spec_ids))
+        db.execute(f"DELETE FROM lecturer_specializations WHERE specialization_id IN ({placeholders})", tuple(spec_ids))
+    db.execute(
+        "DELETE FROM lecturer_folder_nodes WHERE source_master_node_id IN (SELECT id FROM folder_nodes WHERE policy_id=?)",
+        (policy_id,),
+    )
+    db.execute("DELETE FROM specializations WHERE policy_id=?", (policy_id,))
+    db.execute("DELETE FROM folder_nodes WHERE policy_id=?", (policy_id,))
+    db.execute("DELETE FROM policy_files WHERE id=?", (policy_id,))
+    audit(db, user["code"], "policy_file.delete", "policy", policy_id, {"title": policy["title"], "status": policy["status"]})
+    return {"status": "deleted", "id": policy_id}
 
 
 def master_tree(db) -> dict:
@@ -231,7 +381,25 @@ def active_specializations(db) -> list[dict]:
     policy = active_policy(db)
     if not policy:
         return []
-    return rows(db.execute("SELECT * FROM specializations WHERE policy_id=? ORDER BY name", (policy["id"],)).fetchall())
+    items = rows(db.execute("SELECT * FROM specializations WHERE policy_id=? ORDER BY name", (policy["id"],)).fetchall())
+    for item in items:
+        item["courses_count"] = db.execute(
+            "SELECT COUNT(*) count FROM folder_nodes WHERE parent_id=? AND type='course' AND status='active'",
+            (item["folder_node_id"],),
+        ).fetchone()["count"]
+    return items
+
+
+def public_specializations(db) -> list[dict]:
+    return [
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "description": item.get("description", ""),
+            "courses_count": item.get("courses_count", 0),
+        }
+        for item in active_specializations(db)
+    ]
 
 
 def user_specializations(db, user_code: str) -> list[dict]:
@@ -263,8 +431,84 @@ def set_user_specializations(db, user: dict, specialization_ids: list[str]) -> d
             "INSERT OR IGNORE INTO lecturer_specializations(id,user_code,specialization_id,created_at) VALUES(?,?,?,?)",
             (f"ls-{uuid.uuid4().hex[:12]}", user["code"], spec_id, now()),
         )
+    sync_lecturer_folder_nodes(db, user["code"], requested)
     audit(db, user["code"], "profile.specializations_update", "user", user["code"], {"count": len(requested)})
     return profile_specializations(db, user["code"])
+
+
+def sync_lecturer_folder_nodes(db, user_code: str, specialization_ids: set[str]) -> None:
+    timestamp = now()
+    active_ids = set(specialization_ids)
+    if active_ids:
+        placeholders = ",".join("?" for _ in active_ids)
+        db.execute(
+            f"UPDATE lecturer_folder_nodes SET status='inactive',updated_at=? WHERE user_code=? AND specialization_id NOT IN ({placeholders})",
+            (timestamp, user_code, *active_ids),
+        )
+    else:
+        db.execute("UPDATE lecturer_folder_nodes SET status='inactive',updated_at=? WHERE user_code=?", (timestamp, user_code))
+
+    for spec in active_specializations(db):
+        if spec["id"] not in active_ids:
+            continue
+        master_nodes = rows(db.execute(
+            "SELECT * FROM folder_nodes WHERE id IN ({}) AND status='active'".format(
+                ",".join("?" for _ in subtree_node_ids(db, spec["folder_node_id"]))
+            ),
+            tuple(subtree_node_ids(db, spec["folder_node_id"])),
+        ).fetchall())
+        master_by_id = {node["id"]: node for node in master_nodes}
+        pending = [spec["folder_node_id"]]
+        cloned: dict[str, str] = {}
+        while pending:
+            source_id = pending.pop(0)
+            node = master_by_id[source_id]
+            parent_source_id = node.get("parent_id")
+            parent_clone_id = cloned.get(parent_source_id)
+            existing = db.execute(
+                "SELECT * FROM lecturer_folder_nodes WHERE user_code=? AND source_master_node_id=?",
+                (user_code, source_id),
+            ).fetchone()
+            clone_id = existing["id"] if existing else f"lfn-{uuid.uuid4().hex[:12]}"
+            if existing:
+                db.execute(
+                    "UPDATE lecturer_folder_nodes SET parent_id=?,name=?,type=?,specialization_id=?,status='active',updated_at=? WHERE id=?",
+                    (parent_clone_id, node["name"], node["type"], spec["id"], timestamp, clone_id),
+                )
+            else:
+                db.execute(
+                    """INSERT INTO lecturer_folder_nodes(id,user_code,parent_id,name,type,source_master_node_id,specialization_id,status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,'active',?,?)""",
+                    (clone_id, user_code, parent_clone_id, node["name"], node["type"], source_id, spec["id"], timestamp, timestamp),
+                )
+            cloned[source_id] = clone_id
+            children = [item["id"] for item in master_nodes if item.get("parent_id") == source_id]
+            pending.extend(children)
+
+
+def build_lecturer_folder_tree(db, user_code: str) -> dict:
+    nodes = rows(db.execute(
+        "SELECT * FROM lecturer_folder_nodes WHERE user_code=? AND status='active' ORDER BY name",
+        (user_code,),
+    ).fetchall())
+    by_parent: dict[str | None, list[dict]] = {}
+    known_ids = {node["id"] for node in nodes}
+    for node in nodes:
+        parent_id = node.get("parent_id") if node.get("parent_id") in known_ids else None
+        by_parent.setdefault(parent_id, []).append(node)
+    type_order = {"specialization": 0, "course": 1, "standard_folder": 2, "folder": 2}
+    for siblings in by_parent.values():
+        siblings.sort(key=lambda item: (type_order.get(item["type"], 9), item["name"].lower()))
+
+    def build(node: dict) -> dict:
+        return {
+            "id": node["id"],
+            "name": node["name"],
+            "type": "folder" if node["type"] == "standard_folder" else node["type"],
+            "children": [build(child) for child in by_parent.get(node["id"], [])],
+        }
+
+    return {"id": f"root-{user_code}", "name": "Kho của tôi", "type": "root", "children": [build(node) for node in by_parent.get(None, [])]}
 
 
 def profile_specializations(db, user_code: str) -> dict:
@@ -435,9 +679,13 @@ def list_documents(db, user: dict) -> list[dict]:
 
 
 def rag_documents(db, user: dict) -> list[dict]:
-    """All documents the user can access, including approved shared docs."""
-    docs = rows(db.execute("SELECT * FROM documents WHERE deleted_at IS NULL ORDER BY updated_at DESC").fetchall())
-    return [doc for doc in docs if can_read(db, user, doc)]
+    """Strict chatbot scope: public documents plus documents owned by the asker."""
+    return rows(
+        db.execute(
+            "SELECT * FROM documents WHERE deleted_at IS NULL AND status='INDEXED' AND (visibility='public' OR owner_code=?) ORDER BY updated_at DESC",
+            (user["code"],),
+        ).fetchall()
+    )
 
 
 def anonymize_document(document: dict, user: dict) -> dict:
@@ -494,6 +742,7 @@ def permanently_delete_document(db, user: dict, document: dict) -> dict:
     versions = rows(db.execute("SELECT storage_path FROM versions WHERE document_id=?", (document["id"],)).fetchall())
     objects = rows(db.execute("SELECT object_uri FROM object_refs WHERE document_id=?", (document["id"],)).fetchall())
     db.execute("DELETE FROM chunks WHERE document_id=?", (document["id"],))
+    db.execute("DELETE FROM document_processing_jobs WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM object_refs WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM document_v2_state WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM file_assets WHERE document_id=?", (document["id"],))
@@ -583,6 +832,139 @@ def suggest_folder(db, user: dict, metadata: dict) -> str:
     return safe_folder_path(result)
 
 
+def quick_preview_text(filename: str, mime_type: str, raw: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".txt", ".md", ".csv", ".json", ".xml", ".html", ".log"} or mime_type.startswith("text/"):
+        for encoding in ("utf-8", "utf-8-sig", "cp1258", "latin-1"):
+            try:
+                return raw[:12000].decode(encoding, errors="ignore")[:6000]
+            except UnicodeDecodeError:
+                continue
+    if suffix == ".docx":
+        try:
+            with zipfile.ZipFile(BytesIO(raw)) as archive:
+                root = ElementTree.fromstring(archive.read("word/document.xml"))
+            paragraphs = [text.text for text in root.iter() if text.tag.endswith("}t") and text.text]
+            return "\n".join(paragraphs[:80])[:6000]
+        except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
+            return ""
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(BytesIO(raw))
+            return "\n\n".join((page.extract_text() or "") for page in reader.pages[:2]).strip()[:6000]
+        except Exception:
+            return ""
+    return ""
+
+
+def suggest_upload_destination(db, user: dict, filename: str, preview: str) -> dict:
+    text = f"{filename} {preview}".casefold()
+    best: tuple[int, dict | None, dict | None] = (0, None, None)
+    policy = active_policy(db)
+    if policy:
+        tree = json.loads(policy["parsed_json"])
+        for spec in normalize_policy_tree(tree)["specializations"]:
+            spec_score = 2 if spec["name"].casefold() in text else 0
+            for course in spec["courses"]:
+                score = spec_score + (3 if course["name"].casefold() in text else 0)
+                if score > best[0]:
+                    best = (score, spec, course)
+    spec, course = best[1], best[2]
+    doc_type = "Tài liệu khác"
+    for candidate in DOCUMENT_TYPES:
+        if candidate.casefold() in text or candidate.replace(" ", "_").casefold() in text:
+            doc_type = candidate
+            break
+    folder_path = "/".join(part for part in [
+        spec["name"] if spec else "",
+        course["name"] if course else "",
+        doc_type,
+    ] if part)
+    return {
+        "specialization": spec["name"] if spec else "",
+        "course": course["name"] if course else "",
+        "confidence": 0.95 if best[0] >= 5 else (0.65 if best[0] else 0.0),
+        "document_type": doc_type,
+        "folder_path": safe_folder_path(folder_path) if folder_path else "",
+    }
+
+
+def enqueue_processing_jobs(db, document_id: str) -> list[dict]:
+    timestamp = now()
+    jobs = []
+    for job_type in PROCESSING_JOB_TYPES:
+        job_id = f"job-{uuid.uuid4().hex[:12]}"
+        db.execute(
+            "INSERT INTO document_processing_jobs(id,document_id,job_type,status,created_at) VALUES(?,?,?,?,?)",
+            (job_id, document_id, job_type, "PENDING", timestamp),
+        )
+        jobs.append(dict(db.execute("SELECT * FROM document_processing_jobs WHERE id=?", (job_id,)).fetchone()))
+    return jobs
+
+
+def complete_processing_job(db, job: dict) -> None:
+    timestamp = now()
+    db.execute(
+        "UPDATE document_processing_jobs SET status='PROCESSING',started_at=?,error_message=NULL WHERE id=?",
+        (timestamp, job["id"]),
+    )
+    db.execute(
+        "UPDATE document_processing_jobs SET status='COMPLETED',completed_at=?,error_message=NULL WHERE id=?",
+        (now(), job["id"]),
+    )
+
+
+def fail_processing_jobs(db, document_id: str, error: str) -> None:
+    db.execute(
+        "UPDATE document_processing_jobs SET status='FAILED',error_message=?,completed_at=? WHERE document_id=? AND status<>'COMPLETED'",
+        (error, now(), document_id),
+    )
+    db.execute("UPDATE documents SET status='FAILED',updated_at=? WHERE id=?", (now(), document_id))
+    set_v2_state(db, document_id, indexing_status="failed")
+
+
+def run_document_processing_jobs(db, document_id: str) -> dict:
+    document = db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+    if not document:
+        raise ValueError("Document khong ton tai.")
+    jobs = rows(db.execute("SELECT * FROM document_processing_jobs WHERE document_id=? ORDER BY created_at", (document_id,)).fetchall())
+    asset = db.execute(
+        "SELECT * FROM file_assets WHERE document_id=? AND version_no=? ORDER BY created_at DESC LIMIT 1",
+        (document_id, document["current_version"]),
+    ).fetchone()
+    try:
+        db.execute("UPDATE documents SET status='PROCESSING',updated_at=? WHERE id=?", (now(), document_id))
+        set_v2_state(db, document_id, indexing_status="processing")
+        raw = Path(asset["original_path"]).read_bytes() if asset else content_for(db, dict(document)).encode("utf-8")
+        full_text = extract_text(asset["original_name"] if asset else document["title"], asset["mime_type"] if asset else "text/plain", raw)
+        version = db.execute(
+            "SELECT * FROM versions WHERE document_id=? AND version_no=?",
+            (document_id, document["current_version"]),
+        ).fetchone()
+        storage_path = Path(version["storage_path"])
+        storage_path.write_text(full_text, encoding="utf-8")
+        digest = hash_secret(full_text)
+        db.execute("UPDATE versions SET content_hash=? WHERE id=?", (digest, version["id"]))
+        db.execute("UPDATE documents SET content_hash=?,updated_at=? WHERE id=?", (digest, now(), document_id))
+        prompts = policy_value(db, "ai_prompts", {})
+        metadata = guess_metadata(asset["original_name"] if asset else document["title"], full_text, prompts.get("metadata_instructions"))
+        for job in jobs:
+            complete_processing_job(db, job)
+        record_object_ref(db, document_id, document["current_version"], "extracted_text", f"documents/{document_id}/versions/{document['current_version']}/content.txt", full_text.encode("utf-8"), "text/plain")
+        index_document(db, document_id, document["current_version"], full_text, force_local=True)
+        db.execute("UPDATE documents SET status='INDEXED',updated_at=? WHERE id=?", (now(), document_id))
+        audit(db, document["owner_code"], "document.processing_completed", "document", document_id, {
+            "summary": metadata.get("summary", ""),
+            "keywords": metadata.get("keywords", []),
+            "embedding_status": "completed",
+        })
+        return dict(db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone())
+    except Exception as exc:
+        fail_processing_jobs(db, document_id, str(exc))
+        raise
+
+
 def create_document(db, user: dict, payload: dict, defer_processing: bool = False) -> dict:
     content = payload.get("content", "").strip()
     digest = hash_secret(content)
@@ -596,21 +978,23 @@ def create_document(db, user: dict, payload: dict, defer_processing: bool = Fals
     path.write_text(content, encoding="utf-8")
     folder_node = validate_folder_access(db, user, payload.get("folder_node_id"))
     folder_path = safe_folder_path(payload.get("folder_path") or (folder_node["path"] if folder_node else None) or suggest_folder(db, user, payload))
+    status = "UPLOADED" if defer_processing else "PROCESSING"
     db.execute(
-        "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id) VALUES(?,?,?,?,?,?,1,?,?,?,?,?)",
-        (doc_id, payload["title"], payload["doc_type"], payload["topic"], user["code"], payload["visibility"], digest, timestamp, timestamp, folder_path, payload.get("folder_node_id")),
+        "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id,status) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?)",
+        (doc_id, payload["title"], payload["doc_type"], payload["topic"], user["code"], payload["visibility"], digest, timestamp, timestamp, folder_path, payload.get("folder_node_id"), status),
     )
     db.execute(
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", doc_id, 1, str(path), digest, user["code"], timestamp),
     )
     classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
-    set_v2_state(db, doc_id, classification=classification, indexing_status="processing")
+    set_v2_state(db, doc_id, classification=classification, indexing_status="processing" if defer_processing else "processing")
     audit(db, user["code"], "document.create", "document", doc_id, {"title": payload["title"]})
     if not defer_processing:
         record_object_ref(db, doc_id, 1, "extracted_text", f"documents/{doc_id}/versions/1/content.txt", content.encode("utf-8"), "text/plain")
         emit_outbox(db, "document.created", doc_id, {"version_no": 1, "classification": classification})
         index_document(db, doc_id, 1, content)
+        db.execute("UPDATE documents SET status='INDEXED',updated_at=? WHERE id=?", (now(), doc_id))
         sync_document(db, doc_id, path)
     return dict(db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone())
 
@@ -690,8 +1074,8 @@ def update_document(db, user: dict, document: dict, payload: dict, defer_process
     folder_node_id = payload.get("folder_node_id") if "folder_node_id" in payload else document.get("folder_node_id")
     folder_path = safe_folder_path(payload.get("folder_path") or (folder_node["path"] if folder_node else None) or document.get("folder_path") or suggest_folder(db, user, payload))
     db.execute(
-        "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=?,folder_node_id=? WHERE id=?",
-        (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, folder_node_id, document["id"]),
+        "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=?,folder_node_id=?,status=? WHERE id=?",
+        (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, folder_node_id, "UPLOADED" if defer_processing else "PROCESSING", document["id"]),
     )
     classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
     set_v2_state(db, document["id"], classification=classification, indexing_status="processing")
@@ -700,6 +1084,7 @@ def update_document(db, user: dict, document: dict, payload: dict, defer_process
         record_object_ref(db, document["id"], version, "extracted_text", f"documents/{document['id']}/versions/{version}/content.txt", content.encode("utf-8"), "text/plain")
         emit_outbox(db, "document.version_created", document["id"], {"version_no": version})
         index_document(db, document["id"], version, content)
+        db.execute("UPDATE documents SET status='INDEXED',updated_at=? WHERE id=?", (now(), document["id"]))
         sync_document(db, document["id"], path)
     return dict(db.execute("SELECT * FROM documents WHERE id=?", (document["id"],)).fetchone())
 
@@ -715,11 +1100,9 @@ def rollback_document(db, user: dict, document: dict, target: int) -> dict:
 
 
 def ask(db, user: dict, question: str) -> dict:
-    allowed = {doc["id"]: doc for doc in rag_documents(db, user)}
-
-    # --- vector retrieval: best chunk per document ---
+    allowed = {document["id"]: document for document in rag_documents(db, user)}
     query_vectors: dict[str, list[float]] = {}
-    vec_scores: dict[str, tuple[float, dict, str]] = {}
+    vector_matches = []
     for chunk in db.execute("SELECT * FROM chunks").fetchall():
         document = allowed.get(chunk["document_id"])
         if not document:
@@ -727,52 +1110,49 @@ def ask(db, user: dict, question: str) -> dict:
         provider = chunk["provider"]
         if provider not in query_vectors:
             query_vectors[provider] = ai_provider.embed(question, force_local=provider == "local")
-        similarity = sum(a * b for a, b in zip(query_vectors[provider], json.loads(chunk["vector"])))
-        doc_id = document["id"]
-        if doc_id not in vec_scores or similarity > vec_scores[doc_id][0]:
-            vec_scores[doc_id] = (similarity, document, chunk["content"])
-
-    # --- keyword retrieval ---
-    words = {w for w in re.findall(r"\w+", question.lower(), re.UNICODE) if len(w) > 2}
-    kw_scores: dict[str, tuple[float, dict, str]] = {}
-    if words:
-        for document in allowed.values():
-            content = content_for(db, document)
-            searchable = f"{document['title']} {document['topic']} {document['doc_type']} {content}".lower()
-            score = sum(1 for w in words if w in searchable)
-            if score:
-                kw_scores[document["id"]] = (score, document, content)
-
-    # --- hybrid merge (70% vector + 30% keyword) ---
-    max_vec = max((s for s, _, _ in vec_scores.values()), default=1.0) or 1.0
-    max_kw = max((s for s, _, _ in kw_scores.values()), default=1.0) or 1.0
-    merged: list[tuple[float, dict, str]] = []
-    for doc_id in set(vec_scores) | set(kw_scores):
-        v_norm = vec_scores[doc_id][0] / max_vec if doc_id in vec_scores else 0.0
-        k_norm = kw_scores[doc_id][0] / max_kw if doc_id in kw_scores else 0.0
-        hybrid = v_norm * 0.7 + k_norm * 0.3
-        source = vec_scores.get(doc_id) or kw_scores[doc_id]
-        merged.append((hybrid, source[1], source[2]))
-    merged.sort(key=lambda x: x[0], reverse=True)
-    matches = merged[:5]
-
-    audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "accessible"})
+        query_vector = query_vectors[provider]
+        vector = json.loads(chunk["vector"])
+        similarity = sum(a * b for a, b in zip(query_vector, vector))
+        vector_matches.append((similarity, document, chunk["content"]))
+    vector_matches.sort(key=lambda item: item[0], reverse=True)
+    if vector_matches and vector_matches[0][0] > 0:
+        matches = vector_matches[:3]
+    else:
+        matches = []
+    words = {word for word in re.findall(r"\w+", question.lower(), re.UNICODE) if len(word) > 2}
+    scored = []
+    for document in allowed.values():
+        content = content_for(db, document)
+        searchable = f"{document['title']} {document['topic']} {document['doc_type']} {content}".lower()
+        score = sum(word in searchable for word in words)
+        if score:
+            scored.append((score, document, content))
     if not matches:
-        return {"answer": "Không tìm thấy thông tin phù hợp trong phạm vi bạn được phép truy cập.", "citations": []}
+        scored.sort(key=lambda item: item[0], reverse=True)
+        matches = scored[:3]
+    audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "public_or_owned"})
+    if not matches:
+        return {
+            "answer": (
+                "Mình chưa tìm thấy nội dung phù hợp trong những tài liệu bạn được phép xem.\n\n"
+                "Bạn có thể thử dùng **tên học phần**, **chủ đề**, hoặc một cụm từ cụ thể hơn.\n\n"
+                "### Bạn có thể hỏi tiếp\n\n"
+                "- Tìm tài liệu theo chủ đề\n"
+                "- Giải thích một thuật ngữ cụ thể\n"
+                "- Liệt kê tài liệu tôi có thể xem"
+            ),
+            "citations": [],
+            "scope": "public_or_owned",
+        }
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
-    answer = ai_provider.answer(
-        question,
-        [{"title": doc["title"], "content": content} for _, doc, content in matches],
-        fallback,
-        prompts.get("answer_instructions"),
-    )
+    answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, prompts.get("answer_instructions"))
     answer = ensure_conversational_format(answer, question)
     return {
         "answer": answer,
         "citations": [{"id": d["id"], "title": d["title"], "topic": d["topic"], "version": d["current_version"], "visibility": d["visibility"]} for _, d, _ in matches],
-        "scope": "accessible",
-        "pipeline": ["parse", "chunk_overlap", "embed", "vector_store", "permission_filter", "hybrid_retrieve", "answer"],
+        "scope": "public_or_owned",
+        "pipeline": ["parse", "chunk", "embed", "vector_store", "permission_filter", "retrieve", "answer"],
     }
 
 
@@ -787,59 +1167,77 @@ def conversational_fallback(question: str, matches: list[tuple]) -> str:
         detail = sentences[0][:240] if sentences else f"Tài liệu tập trung vào {document['topic']}."
         highlights.append((document["title"], detail))
 
-    lines = "\n".join(f"- **{title}**: {detail}" for title, detail in highlights)
-    return f"Dưới đây là thông tin tìm được từ các tài liệu liên quan:\n\n{lines}"
+    topic_lines = "\n\n".join(
+        f"- **{title}**: {detail}" for title, detail in highlights
+    )
+    attention = "\n\n".join(
+        f"⚠️ Chú ý phần **{document['topic']}** trong tài liệu *{document['title']}*."
+        for _, document, _ in matches[:2]
+    )
+    return (
+        "📚 Mình đã đọc các tài liệu liên quan và đây là phần hữu ích nhất cho câu hỏi của bạn.\n\n"
+        "### Nội dung trọng tâm\n\n"
+        f"{topic_lines}\n\n"
+        "### Những phần cần chú ý\n\n"
+        f"{attention}\n\n"
+        "### Gợi ý học tập\n\n"
+        "✅ Đọc lần lượt từng ý trọng tâm, sau đó tự diễn giải lại bằng lời của bạn.\n\n"
+        f"✅ Đối chiếu các ý trên với câu hỏi **{question.strip()}** để xác định phần cần đào sâu.\n\n"
+        "### Bạn có thể hỏi tiếp\n\n"
+        "- Giải thích kỹ hơn từng ý\n"
+        "- Tạo câu hỏi ôn tập từ nội dung này\n"
+        "- So sánh các tài liệu liên quan\n"
+        "- Đề xuất lộ trình học"
+    )
 
 
 def ensure_conversational_format(answer: str, question: str) -> str:
-    # Strip any source citation block the AI might have appended
     cleaned = re.split(
         r"\n#{0,3}\s*(?:📄\s*)?(?:Nguồn tham khảo|Nguồn tài liệu|Tài liệu tham khảo)\s*:?",
         answer.strip(),
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip()
-    # Strip legacy template sections if AI still generates them
-    for pattern in (
-        r"\n###\s*Bạn có thể hỏi tiếp[\s\S]*",
-        r"\n###\s*Gợi ý học tập[\s\S]*",
-        r"\n###\s*Những phần cần chú ý[\s\S]*(?=\n###|$)",
-    ):
-        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
-    return cleaned
-
-
-def _split_chunks(content: str, max_len: int = 1000, overlap: int = 200) -> list[str]:
-    units = [p.strip() for p in re.split(r"\n\s*\n|(?<=[.!?])\s+", content) if p.strip()]
-    if not units:
-        return [content.strip()] if content.strip() else []
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-    for unit in units:
-        unit_len = len(unit) + 1
-        if current_len + unit_len > max_len and current:
-            chunks.append(" ".join(current))
-            tail: list[str] = []
-            tail_len = 0
-            for part in reversed(current):
-                if tail_len + len(part) + 1 > overlap:
-                    break
-                tail.insert(0, part)
-                tail_len += len(part) + 1
-            current = tail
-            current_len = tail_len
-        current.append(unit)
-        current_len += unit_len
-    if current:
-        chunks.append(" ".join(current))
-    return chunks
+    required = (
+        "### Nội dung trọng tâm",
+        "### Những phần cần chú ý",
+        "### Gợi ý học tập",
+        "### Bạn có thể hỏi tiếp",
+    )
+    if all(section in cleaned for section in required):
+        return cleaned
+    return (
+        "📚 Mình đã đọc tài liệu và chọn ra những ý hữu ích nhất cho bạn.\n\n"
+        "### Nội dung trọng tâm\n\n"
+        f"{cleaned}\n\n"
+        "### Những phần cần chú ý\n\n"
+        "⚠️ Hãy đối chiếu các ý trên với **ngữ cảnh và phạm vi áp dụng** trong tài liệu.\n\n"
+        "### Gợi ý học tập\n\n"
+        f"✅ Thử diễn giải lại câu trả lời cho câu hỏi **{question.strip()}** bằng lời của bạn.\n\n"
+        "✅ Chọn một phần chưa rõ và hỏi sâu hơn thay vì đọc lại toàn bộ.\n\n"
+        "### Bạn có thể hỏi tiếp\n\n"
+        "- Giải thích kỹ hơn một phần\n"
+        "- Tạo câu hỏi ôn tập từ nội dung này\n"
+        "- So sánh các tài liệu liên quan\n"
+        "- Đề xuất nội dung nên học tiếp"
+    )
 
 
 def index_document(db, document_id: str, version_no: int, content: str, force_local: bool = False) -> None:
     db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
     delete_vectors(document_id)
-    for chunk in _split_chunks(content)[:200]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n|(?<=[.!?])\s+", content) if part.strip()]
+    chunks = []
+    current = ""
+    for paragraph in paragraphs or [content]:
+        if len(current) + len(paragraph) > 1200 and current:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = f"{current} {paragraph}".strip()
+    if current:
+        chunks.append(current)
+    for chunk in chunks[:100]:
         chunk_id = f"chunk-{uuid.uuid4().hex[:12]}"
         vector = ai_provider.embed(chunk, force_local=force_local)
         indexed_external = False if force_local else upsert_vector(
@@ -848,13 +1246,12 @@ def index_document(db, document_id: str, version_no: int, content: str, force_lo
         db.execute(
             "INSERT INTO chunks VALUES(?,?,?,?,?,?,?)",
             (
-                chunk_id, document_id, version_no, chunk,
-                json.dumps(vector),
+                chunk_id, document_id, version_no, chunk, json.dumps(vector),
                 "qdrant" if indexed_external else ("local" if force_local else ai_provider.mode), now(),
             ),
         )
     set_v2_state(db, document_id, indexing_status="completed")
-    emit_outbox(db, "document.indexed", document_id, {"version_no": version_no})
+    emit_outbox(db, "document.indexed", document_id, {"version_no": version_no, "chunks": len(chunks[:100])})
 
 
 def create_backup(db, user: dict) -> dict:
@@ -932,9 +1329,7 @@ def quality_report(db) -> dict:
     for document in documents:
         hashes.setdefault(document["content_hash"], []).append(document)
     duplicates = [[item["title"] for item in group] for group in hashes.values() if len(group) > 1]
-    from datetime import datetime, timedelta
-    cutoff = (datetime.utcnow() - timedelta(days=90)).strftime("%Y-%m-%d")
-    stale = [doc for doc in documents if doc["updated_at"][:10] < cutoff]
+    stale = [doc for doc in documents if doc["updated_at"] < "2025-06-09"]
     missing = []
     for course in db.execute("SELECT * FROM courses").fetchall():
         required = json.loads(course["required_doc_types"])

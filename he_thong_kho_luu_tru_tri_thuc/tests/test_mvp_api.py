@@ -709,10 +709,19 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
             lecturer = login(client, "GV001")
 
             policy_payload = {
-                "department": "Khoa CNTT",
+                "faculty": "Khoa CNTT",
                 "specializations": [
-                    {"name": "AI Application", "folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
-                    {"name": "Machine Learning", "folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+                    {
+                        "name": "Tri tue nhan tao",
+                        "courses": [
+                            {"name": "AI Application", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+                            {"name": "Machine Learning", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+                        ],
+                    },
+                    {
+                        "name": "Data Science",
+                        "courses": [{"name": "Data Mining", "standard_folders": ["De cuong", "Lab", "De thi"]}],
+                    },
                 ],
             }
             uploaded = client.post(
@@ -722,20 +731,47 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
             )
             assert uploaded.status_code == 201
             assert uploaded.json()["status"] == "draft"
+            draft_to_delete = client.post(
+                "/api/policies/upload",
+                headers={**admin, "X-Filename": "delete-policy.json", "X-Title": "Policy xoa thu", "Content-Type": "application/json"},
+                content=json.dumps(policy_payload).encode(),
+            )
+            assert draft_to_delete.status_code == 201
+            deleted_draft = client.delete(f"/api/policies/{draft_to_delete.json()['id']}", headers=admin)
+            assert deleted_draft.status_code == 200
+            assert deleted_draft.json()["status"] == "deleted"
 
             activated = client.post(f"/api/policies/{uploaded.json()['id']}/activate", headers=admin)
             assert activated.status_code == 200
             assert activated.json()["status"] == "active"
+            delete_active = client.delete(f"/api/policies/{uploaded.json()['id']}", headers=admin)
+            assert delete_active.status_code == 400
 
             master = client.get("/api/admin/master-tree", headers=admin)
             assert master.status_code == 200
             spec_names = [node["name"] for node in master.json()["tree"]["children"]]
-            assert spec_names == ["AI Application", "Machine Learning"]
+            assert master.json()["tree"]["name"] == "Khoa CNTT"
+            assert spec_names == ["Data Science", "Tri tue nhan tao"]
+            ai_master = next(node for node in master.json()["tree"]["children"] if node["name"] == "Tri tue nhan tao")
+            assert [node["type"] for node in ai_master["children"]] == ["course", "course"]
+            assert next(node for node in ai_master["children"] if node["name"] == "AI Application")["children"][0]["type"] == "standard_folder"
+
+            master_alias = client.get("/master-tree", headers=admin)
+            assert master_alias.status_code == 200
+            assert master_alias.json()[0]["name"] == "Khoa CNTT"
+            api_master_alias = client.get("/api/master-folder-tree", headers=admin)
+            assert api_master_alias.status_code == 200
+            assert api_master_alias.json()[0]["children"][0]["type"] == "specialization"
+
+            specializations = client.get("/api/specializations", headers=lecturer)
+            assert specializations.status_code == 200
+            ai_summary = next(item for item in specializations.json() if item["name"] == "Tri tue nhan tao")
+            assert ai_summary["courses_count"] == 2
 
             profile = client.get("/api/profile/specializations", headers=lecturer)
             assert profile.status_code == 200
-            ai_spec = next(item for item in profile.json()["available"] if item["name"] == "AI Application")
-            ml_spec = next(item for item in profile.json()["available"] if item["name"] == "Machine Learning")
+            ai_spec = next(item for item in profile.json()["available"] if item["name"] == "Tri tue nhan tao")
+            ds_spec = next(item for item in profile.json()["available"] if item["name"] == "Data Science")
 
             empty_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
             assert empty_tree["children"] == []
@@ -746,8 +782,32 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
             assert selected.json()["selected_ids"] == [ai_spec["id"]]
 
             my_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
-            assert [node["name"] for node in my_tree["children"]] == ["AI Application"]
-            ai_lab = next(child for child in my_tree["children"][0]["children"] if child["name"] == "Lab")
+            assert [node["name"] for node in my_tree["children"]] == ["Tri tue nhan tao"]
+            ai_course = next(child for child in my_tree["children"][0]["children"] if child["name"] == "AI Application")
+            ai_lab = next(child for child in ai_course["children"] if child["name"] == "Lab")
+
+            virtual_alias = client.get("/virtual-tree/GV001", headers=lecturer)
+            assert virtual_alias.status_code == 200
+            assert virtual_alias.json()[0]["name"] == "Tri tue nhan tao"
+
+            lecturer_tree = client.get("/api/lecturers/GV001/folder-tree", headers=lecturer)
+            assert lecturer_tree.status_code == 200
+            assert lecturer_tree.json()[0]["name"] == "Kho của tôi"
+            assert lecturer_tree.json()[0]["children"][0]["name"] == "Tri tue nhan tao"
+
+            repeat_selection = client.post(
+                "/api/lecturers/GV001/specializations",
+                headers=lecturer,
+                json={"specialization_ids": [ai_spec["id"]]},
+            )
+            assert repeat_selection.status_code == 200
+            with database.connection() as db:
+                active_clones = db.execute(
+                    "SELECT COUNT(*) count FROM lecturer_folder_nodes WHERE user_code='GV001' AND status='active'"
+                ).fetchone()["count"]
+            repeat_tree = client.get("/api/lecturers/GV001/folder-tree", headers=lecturer).json()
+            assert active_clones == 1 + 2 + 8
+            assert repeat_tree[0]["children"][0]["children"][0]["children"][0]["type"] == "folder"
 
             forbidden = client.post(
                 "/api/documents/upload",
@@ -755,10 +815,10 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
                     **lecturer,
                     "X-Filename": "ml.txt",
                     "X-Title": "ML forbidden",
-                    "X-Topic": "Machine Learning",
+                    "X-Topic": "Data Mining",
                     "X-Doc-Type": "Lab",
                     "X-Visibility": "public",
-                    "X-Folder-Node-Id": ml_spec["folder_node_id"],
+                    "X-Folder-Node-Id": ds_spec["folder_node_id"],
                     "Content-Type": "text/plain",
                 },
                 content=b"cannot upload here",
@@ -785,13 +845,13 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
             both = client.put(
                 "/api/profile/specializations",
                 headers=lecturer,
-                json={"specialization_ids": [ai_spec["id"], ml_spec["id"]]},
+                json={"specialization_ids": [ai_spec["id"], ds_spec["id"]]},
             )
             assert both.status_code == 200
             expanded_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
-            assert [node["name"] for node in expanded_tree["children"]] == ["AI Application", "Machine Learning"]
+            assert [node["name"] for node in expanded_tree["children"]] == ["Data Science", "Tri tue nhan tao"]
 
-            removed = client.put("/api/profile/specializations", headers=lecturer, json={"specialization_ids": [ml_spec["id"]]})
+            removed = client.put("/api/profile/specializations", headers=lecturer, json={"specialization_ids": [ds_spec["id"]]})
             assert removed.status_code == 200
             reduced_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
-            assert [node["name"] for node in reduced_tree["children"]] == ["Machine Learning"]
+            assert [node["name"] for node in reduced_tree["children"]] == ["Data Science"]

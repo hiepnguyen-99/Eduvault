@@ -27,6 +27,12 @@ export type UploadMetadata = {
     visibility: "public" | "private";
     folder_path: string;
   };
+  quick_suggestion?: {
+    specialization?: string;
+    course?: string;
+    confidence?: number;
+    folder_path?: string;
+  };
 };
 
 export type UploadTask = {
@@ -58,7 +64,7 @@ const statusLabels: Record<UploadTask["status"], string> = {
   uploaded: "Đã tải file gốc",
   analyzing: "Đang AI phân tích",
   saving_metadata: "Đang lưu metadata",
-  completed: "Hoàn tất",
+  completed: "Đã lưu, AI xử lý nền",
   failed: "Thất bại",
 };
 

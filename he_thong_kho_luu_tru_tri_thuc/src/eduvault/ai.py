@@ -31,7 +31,7 @@ class AIProvider:
 
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+        self.model = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 
     @property
@@ -108,17 +108,61 @@ class AIProvider:
         except (RuntimeError, json.JSONDecodeError):
             return fallback
 
+    def policy_tree(self, content: str, fallback: dict) -> dict:
+        if not self.api_key or not content.strip():
+            return fallback
+        instructions = """
+Ban la bo parser Policy cho he thong EduVault. Chi tra JSON hop le, khong markdown.
+Schema bat buoc:
+{
+  "faculty": {"name": "ten khoa", "code": "ma khoa neu co"},
+  "specializations": [
+    {
+      "name": "ten nhom chuyen mon",
+      "description": "",
+      "courses": [
+        {
+          "name": "ten hoc phan",
+          "code": "ma hoc phan neu co",
+          "description": "",
+          "standard_folders": [
+            "De cuong mon hoc",
+            "Bai giang",
+            "Slide",
+            "Lab",
+            "Bai tap",
+            "De thi",
+            "Dap an",
+            "Tai lieu tham khảo"
+          ]
+        }
+      ]
+    }
+  ]
+}
+Khong tao node rong. Khong dat ten node la "Thu muc". Khong tra id ky thuat.
+Neu policy chi co hoc phan ma khong noi ro nhom chuyen mon, hay gom theo nhom chuyen mon gan nhat trong van ban.
+"""
+        try:
+            raw = self._response(instructions, f"Noi dung policy:\n{content[:20000]}")
+            cleaned = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+            return {**fallback, **json.loads(cleaned)}
+        except (RuntimeError, json.JSONDecodeError):
+            return fallback
+
     def answer(self, question: str, contexts: list[dict], fallback: str, instructions: str | None = None) -> str:
         if not self.api_key or not contexts:
             return fallback
         context = "\n\n".join(f"[{item['title']}]\n{item['content'][:6000]}" for item in contexts)
         experience_instructions = """
 Bạn là trợ lý tri thức thân thiện đang trò chuyện trực tiếp với người dùng.
-- Trả lời thẳng vào câu hỏi, không mở đầu bằng "Nguồn tài liệu", "Tóm tắt" hoặc "Kết quả".
+- Không viết như báo cáo kỹ thuật và không mở đầu bằng "Nguồn tài liệu", "Tóm tắt" hoặc "Kết quả".
 - Dùng câu ngắn, mỗi đoạn tối đa 2-3 dòng; chia thành các khối dễ quét mắt.
-- Dùng markdown và bullet ngắn để trình bày, highlight ý quan trọng bằng **chữ đậm**.
+- Dùng markdown và emoji nhẹ. Chỉ dùng bullet ngắn, không tạo danh sách dài liên tục.
+- Highlight ý quan trọng bằng **chữ đậm**.
+- Với tài liệu dài, ưu tiên tổng quan, chủ đề chính, nội dung cần chú ý và gợi ý học tập.
 - Không viết phần nguồn trong câu trả lời; ứng dụng sẽ hiển thị nguồn riêng ở cuối.
-- Không thêm mục gợi ý câu hỏi, gợi ý học tập hay bất kỳ phần phụ nào sau câu trả lời.
+- Luôn kết thúc bằng mục "### Bạn có thể hỏi tiếp" với 3-4 câu hỏi gợi ý ngắn.
 """
         try:
             return self._response(
