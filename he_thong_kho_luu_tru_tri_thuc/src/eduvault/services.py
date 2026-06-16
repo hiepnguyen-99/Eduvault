@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import shutil
@@ -15,6 +16,16 @@ from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, no
 from .infrastructure import delete_object, delete_vectors, publish_event, store_object, upsert_vector
 
 
+DEFAULT_POLICY_TREE = {
+    "department": "Khoa CNTT",
+    "specializations": [
+        {"name": "AI Application", "folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+        {"name": "Machine Learning", "folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+        {"name": "Data Engineering", "folders": ["De cuong", "Bai giang", "ETL", "De thi"]},
+    ],
+}
+
+
 def audit(db, actor: str, action: str, resource_type: str, resource_id: str | None, detail: dict | None = None):
     db.execute(
         "INSERT INTO audit_logs(actor_code,action,resource_type,resource_id,detail,created_at) VALUES(?,?,?,?,?,?)",
@@ -25,6 +36,312 @@ def audit(db, actor: str, action: str, resource_type: str, resource_id: str | No
 def policy_value(db, key: str, fallback: dict) -> dict:
     row = db.execute("SELECT value FROM policies WHERE key=?", (key,)).fetchone()
     return json.loads(row["value"]) if row else fallback
+
+
+def _try_parse_yaml_like(text: str) -> dict | None:
+    department = None
+    specializations: list[dict] = []
+    current: dict | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        lowered = line.lower()
+        if lowered.startswith("department:"):
+            department = line.split(":", 1)[1].strip().strip("'\"")
+        elif lowered.startswith("- name:") or lowered.startswith("name:"):
+            if current:
+                specializations.append(current)
+            current = {"name": line.split(":", 1)[1].strip().strip("'\""), "folders": []}
+        elif lowered.startswith("folders:") and current is not None:
+            value = line.split(":", 1)[1].strip()
+            current["folders"] = [item.strip().strip("'\"") for item in value.strip("[]").split(",") if item.strip()]
+        elif line.startswith("-") and current is not None:
+            current.setdefault("folders", []).append(line[1:].strip().strip("'\""))
+    if current:
+        specializations.append(current)
+    if department and specializations:
+        return {"department": department, "specializations": specializations}
+    return None
+
+
+def parse_policy_tree(raw_text: str) -> dict:
+    text = raw_text.strip()
+    if not text:
+        return DEFAULT_POLICY_TREE
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = _try_parse_yaml_like(text)
+    if not data:
+        specs: list[dict] = []
+        current_name = ""
+        current_folders: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip(" -\t")
+            if not line:
+                continue
+            if ":" in line:
+                label, value = line.split(":", 1)
+                if label.strip().lower() in {"department", "khoa"}:
+                    continue
+                if current_name:
+                    specs.append({"name": current_name, "folders": current_folders or DEFAULT_POLICY_TREE["specializations"][0]["folders"]})
+                current_name = label.strip()
+                current_folders = [item.strip() for item in re.split(r",|;", value) if item.strip()]
+        if current_name:
+            specs.append({"name": current_name, "folders": current_folders or DEFAULT_POLICY_TREE["specializations"][0]["folders"]})
+        data = {"department": "Khoa CNTT", "specializations": specs or DEFAULT_POLICY_TREE["specializations"]}
+    department = str(data.get("department") or DEFAULT_POLICY_TREE["department"]).strip()
+    specializations = []
+    for item in data.get("specializations", []):
+        name = str(item.get("name") or "").strip()
+        folders = [str(folder).strip() for folder in item.get("folders", []) if str(folder).strip()]
+        if name:
+            specializations.append({"name": name, "folders": folders or DEFAULT_POLICY_TREE["specializations"][0]["folders"]})
+    if not specializations:
+        specializations = DEFAULT_POLICY_TREE["specializations"]
+    return {"department": department, "specializations": specializations}
+
+
+def tree_node_public(row: dict, children: list[dict] | None = None) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "parent_id": row.get("parent_id"),
+        "type": row["type"],
+        "policy_id": row["policy_id"],
+        "path": row["path"],
+        "status": row.get("status", "active"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "children": children or [],
+    }
+
+
+def build_tree_from_rows(nodes: list[dict], root_name: str | None = None) -> dict:
+    by_parent: dict[str | None, list[dict]] = {}
+    known_ids = {node["id"] for node in nodes}
+    for node in nodes:
+        parent_id = node.get("parent_id") if node.get("parent_id") in known_ids else None
+        by_parent.setdefault(parent_id, []).append(node)
+    for siblings in by_parent.values():
+        siblings.sort(key=lambda item: (item["type"] != "department", item["name"].lower()))
+
+    def build(node: dict) -> dict:
+        return tree_node_public(node, [build(child) for child in by_parent.get(node["id"], [])])
+
+    roots = [build(node) for node in by_parent.get(None, [])]
+    if root_name is not None:
+        return {"name": root_name, "children": roots}
+    return roots[0] if len(roots) == 1 else {"name": "Master Folder Tree", "children": roots}
+
+
+def active_policy(db) -> dict | None:
+    row = db.execute("SELECT * FROM policy_files WHERE status='active' ORDER BY activated_at DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
+def create_policy_file(db, user: dict, title: str, filename: str, raw: bytes, mime_type: str) -> dict:
+    text = extract_text(filename, mime_type, raw)
+    parsed = parse_policy_tree(text)
+    policy_id = f"policy-{uuid.uuid4().hex[:12]}"
+    policy_dir = STORAGE_DIR / "policies"
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = safe_filename(filename)
+    file_path = policy_dir / f"{policy_id}_{safe_name}"
+    file_path.write_bytes(raw)
+    timestamp = now()
+    db.execute(
+        "INSERT INTO policy_files(id,title,file_path,status,raw_text,parsed_json,created_by,created_at,activated_at) VALUES(?,?,?,?,?,?,?,?,NULL)",
+        (policy_id, title, str(file_path), "draft", text, json.dumps(parsed, ensure_ascii=False), user["code"], timestamp),
+    )
+    audit(db, user["code"], "policy_file.upload", "policy", policy_id, {"filename": filename})
+    return dict(db.execute("SELECT * FROM policy_files WHERE id=?", (policy_id,)).fetchone())
+
+
+def activate_policy_file(db, user: dict, policy_id: str) -> dict:
+    policy = db.execute("SELECT * FROM policy_files WHERE id=?", (policy_id,)).fetchone()
+    if not policy:
+        raise ValueError("Policy khong ton tai.")
+    parsed = json.loads(policy["parsed_json"])
+    timestamp = now()
+    previous_nodes = rows(db.execute("SELECT * FROM folder_nodes WHERE status='active'").fetchall())
+    previous_paths = {node["path"] for node in previous_nodes}
+    next_paths: set[str] = set()
+    db.execute("UPDATE policy_files SET status='archived' WHERE status='active' AND id<>?", (policy_id,))
+    db.execute("UPDATE policy_files SET status='active',activated_at=? WHERE id=?", (timestamp, policy_id))
+
+    department_id = f"node-{uuid.uuid4().hex[:12]}"
+    department = parsed["department"]
+    next_paths.add(department)
+    db.execute(
+        "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (department_id, policy_id, department, None, "department", department, "active", timestamp, timestamp),
+    )
+    for spec in parsed["specializations"]:
+        spec_id = f"node-{uuid.uuid4().hex[:12]}"
+        spec_path = f"{department}/{spec['name']}"
+        next_paths.add(spec_path)
+        db.execute(
+            "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (spec_id, policy_id, spec["name"], department_id, "specialization", spec_path, "active", timestamp, timestamp),
+        )
+        specialization_id = f"spec-{uuid.uuid4().hex[:12]}"
+        db.execute(
+            "INSERT INTO specializations(id,name,description,policy_id,folder_node_id) VALUES(?,?,?,?,?)",
+            (specialization_id, spec["name"], "", policy_id, spec_id),
+        )
+        for folder in spec["folders"]:
+            folder_id = f"node-{uuid.uuid4().hex[:12]}"
+            folder_path = f"{spec_path}/{folder}"
+            next_paths.add(folder_path)
+            db.execute(
+                "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (folder_id, policy_id, folder, spec_id, "folder", folder_path, "active", timestamp, timestamp),
+            )
+    deprecated_paths = previous_paths - next_paths
+    if deprecated_paths:
+        for node in previous_nodes:
+            if node["path"] in deprecated_paths:
+                db.execute("UPDATE folder_nodes SET status='deprecated',updated_at=? WHERE id=?", (timestamp, node["id"]))
+    audit(db, user["code"], "policy_file.activate", "policy", policy_id, {"department": department, "specializations": len(parsed["specializations"])})
+    return policy_public(db.execute("SELECT * FROM policy_files WHERE id=?", (policy_id,)).fetchone())
+
+
+def policy_public(row) -> dict:
+    item = dict(row)
+    item["parsed_json"] = json.loads(item["parsed_json"])
+    return item
+
+
+def list_policy_files(db) -> list[dict]:
+    return [policy_public(row) for row in db.execute("SELECT * FROM policy_files ORDER BY created_at DESC").fetchall()]
+
+
+def master_tree(db) -> dict:
+    policy = active_policy(db)
+    if not policy:
+        return {"policy": None, "tree": None, "message": "He thong chua co policy active. Vui long lien he Admin."}
+    nodes = rows(db.execute("SELECT * FROM folder_nodes WHERE policy_id=? ORDER BY path", (policy["id"],)).fetchall())
+    return {"policy": policy_public(policy), "tree": build_tree_from_rows(nodes)}
+
+
+def active_specializations(db) -> list[dict]:
+    policy = active_policy(db)
+    if not policy:
+        return []
+    return rows(db.execute("SELECT * FROM specializations WHERE policy_id=? ORDER BY name", (policy["id"],)).fetchall())
+
+
+def user_specializations(db, user_code: str) -> list[dict]:
+    policy = active_policy(db)
+    if not policy:
+        return []
+    return rows(db.execute(
+        """SELECT s.* FROM lecturer_specializations ls
+           JOIN specializations s ON s.id=ls.specialization_id
+           WHERE ls.user_code=? AND s.policy_id=? ORDER BY s.name""",
+        (user_code, policy["id"]),
+    ).fetchall())
+
+
+def set_user_specializations(db, user: dict, specialization_ids: list[str]) -> dict:
+    policy = active_policy(db)
+    if not policy:
+        raise ValueError("He thong chua co policy active. Vui long lien he Admin.")
+    allowed = {item["id"] for item in active_specializations(db)}
+    requested = set(specialization_ids)
+    if not requested.issubset(allowed):
+        raise ValueError("Nhom chuyen mon khong thuoc policy active.")
+    db.execute(
+        "DELETE FROM lecturer_specializations WHERE user_code=? AND specialization_id IN (SELECT id FROM specializations WHERE policy_id=?)",
+        (user["code"], policy["id"]),
+    )
+    for spec_id in sorted(requested):
+        db.execute(
+            "INSERT OR IGNORE INTO lecturer_specializations(id,user_code,specialization_id,created_at) VALUES(?,?,?,?)",
+            (f"ls-{uuid.uuid4().hex[:12]}", user["code"], spec_id, now()),
+        )
+    audit(db, user["code"], "profile.specializations_update", "user", user["code"], {"count": len(requested)})
+    return profile_specializations(db, user["code"])
+
+
+def profile_specializations(db, user_code: str) -> dict:
+    policy = active_policy(db)
+    all_specs = active_specializations(db)
+    selected = user_specializations(db, user_code)
+    return {
+        "policy": policy_public(policy) if policy else None,
+        "available": all_specs,
+        "selected_ids": [item["id"] for item in selected],
+        "message": None if policy else "He thong chua co policy active. Vui long lien he Admin.",
+    }
+
+
+def subtree_node_ids(db, root_id: str) -> set[str]:
+    pending = [root_id]
+    result: set[str] = set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in result:
+            continue
+        result.add(node_id)
+        pending.extend(row["id"] for row in db.execute("SELECT id FROM folder_nodes WHERE parent_id=? AND status='active'", (node_id,)).fetchall())
+    return result
+
+
+def allowed_folder_node_ids(db, user: dict) -> set[str]:
+    if user["role"] in {"admin", "head"}:
+        policy = active_policy(db)
+        if not policy:
+            return set()
+        return {row["id"] for row in db.execute("SELECT id FROM folder_nodes WHERE policy_id=? AND status='active'", (policy["id"],)).fetchall()}
+    allowed: set[str] = set()
+    for spec in user_specializations(db, user["code"]):
+        allowed.update(subtree_node_ids(db, spec["folder_node_id"]))
+    return allowed
+
+
+def validate_folder_access(db, user: dict, folder_node_id: str | None) -> dict | None:
+    if not folder_node_id:
+        return None
+    node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND status='active'", (folder_node_id,)).fetchone()
+    if not node:
+        raise PermissionError("Thu muc trong Master Tree khong ton tai hoac da deprecated.")
+    if folder_node_id not in allowed_folder_node_ids(db, user):
+        raise PermissionError("Ban khong co quyen upload vao nhanh chuyen mon nay.")
+    return dict(node)
+
+
+def get_my_folder_tree(db, user: dict) -> dict:
+    policy = active_policy(db)
+    if not policy:
+        return {
+            "policy": None,
+            "name": "Kho cua toi",
+            "children": [],
+            "message": "He thong chua co policy active. Vui long lien he Admin.",
+        }
+    specs = user_specializations(db, user["code"])
+    if user["role"] in {"admin", "head"}:
+        nodes = rows(db.execute("SELECT * FROM folder_nodes WHERE policy_id=? AND status='active'", (policy["id"],)).fetchall())
+        return {"policy": policy_public(policy), "name": "Kho cua toi", "children": [build_tree_from_rows(nodes)]}
+    if not specs:
+        return {
+            "policy": policy_public(policy),
+            "name": "Kho cua toi",
+            "children": [],
+            "message": "Ban chua chon nhom chuyen mon. Vui long cap nhat ho so de he thong tao cay thu muc phu hop.",
+        }
+    nodes: list[dict] = []
+    for spec in specs:
+        ids = subtree_node_ids(db, spec["folder_node_id"])
+        if not ids:
+            continue
+        placeholders = ",".join("?" for _ in ids)
+        nodes.extend(rows(db.execute(f"SELECT * FROM folder_nodes WHERE id IN ({placeholders}) AND status='active'", tuple(ids)).fetchall()))
+    return {"policy": policy_public(policy), "name": "Kho cua toi", "children": build_tree_from_rows(nodes, "Kho cua toi")["children"]}
 
 
 def v2_state_for(db, document_id: str) -> dict:
@@ -92,7 +409,15 @@ def record_object_ref(
 
 
 def can_read(db, user: dict, document: dict) -> bool:
-    if document["visibility"] == "public" or document["owner_code"] == user["code"]:
+    if document["owner_code"] == user["code"]:
+        return True
+    if document["visibility"] == "private":
+        approved = db.execute(
+            "SELECT 1 FROM access_requests WHERE document_id=? AND requester_code=? AND status='approved'",
+            (document["id"], user["code"]),
+        ).fetchone()
+        return bool(approved)
+    if document["visibility"] == "public":
         return True
     state = v2_state_for(db, document["id"])
     if state.get("classification") == "confidential" and user["role"] == "head":
@@ -174,6 +499,7 @@ def permanently_delete_document(db, user: dict, document: dict) -> dict:
     db.execute("DELETE FROM file_assets WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM versions WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM access_requests WHERE document_id=?", (document["id"],))
+    db.execute("UPDATE upload_tasks SET document_id=NULL WHERE document_id=?", (document["id"],))
     db.execute("DELETE FROM documents WHERE id=?", (document["id"],))
     for item in assets + versions:
         path = Path(item.get("original_path") or item.get("storage_path"))
@@ -219,8 +545,31 @@ def guess_metadata(filename: str, content: str, instructions: str | None = None)
     return ai_provider.metadata(filename, content, fallback, instructions)
 
 
-def safe_segment(value: str) -> str:
-    return (re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .-")[:100] or "Khác")
+def safe_segment(value: str, max_length: int = 30) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .-") or "Khác"
+    if len(cleaned) <= max_length:
+        return cleaned
+    suffix = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"{cleaned[:max_length - 9].rstrip(' .-')}-{suffix}"
+
+
+def safe_folder_path(value: str, max_length: int = 55) -> str:
+    segments = [safe_segment(part) for part in value.replace("\\", "/").split("/") if part.strip()]
+    result = "/".join(segments)
+    while len(result) > max_length and segments:
+        longest = max(range(len(segments)), key=lambda index: len(segments[index]))
+        segments[longest] = safe_segment(segments[longest], max(12, len(segments[longest]) - 5))
+        result = "/".join(segments)
+    return result or "Unsorted"
+
+
+def safe_filename(value: str, max_length: int = 55) -> str:
+    source = Path(value).name
+    suffix = re.sub(r"[^A-Za-z0-9.]+", "", Path(source).suffix)[:10]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(source).stem).strip("._-") or "upload"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
+    available = max(8, max_length - len(suffix) - len(digest) - 2)
+    return f"{stem[:available]}-{digest}{suffix}"
 
 
 def suggest_folder(db, user: dict, metadata: dict) -> str:
@@ -231,10 +580,10 @@ def suggest_folder(db, user: dict, metadata: dict) -> str:
     result = template
     for key in ("department", "topic", "doc_type", "visibility", "owner_code", "title"):
         result = result.replace(f"{{{key}}}", safe_segment(str(values.get(key, "Khác"))))
-    return "/".join(safe_segment(part) for part in result.replace("\\", "/").split("/") if part)
+    return safe_folder_path(result)
 
 
-def create_document(db, user: dict, payload: dict) -> dict:
+def create_document(db, user: dict, payload: dict, defer_processing: bool = False) -> dict:
     content = payload.get("content", "").strip()
     digest = hash_secret(content)
     duplicate = db.execute("SELECT id,title FROM documents WHERE content_hash=?", (digest,)).fetchone()
@@ -245,10 +594,11 @@ def create_document(db, user: dict, payload: dict) -> dict:
     path = STORAGE_DIR / doc_id / "v1.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    folder_path = payload.get("folder_path") or suggest_folder(db, user, payload)
+    folder_node = validate_folder_access(db, user, payload.get("folder_node_id"))
+    folder_path = safe_folder_path(payload.get("folder_path") or (folder_node["path"] if folder_node else None) or suggest_folder(db, user, payload))
     db.execute(
-        "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path) VALUES(?,?,?,?,?,?,1,?,?,?,?)",
-        (doc_id, payload["title"], payload["doc_type"], payload["topic"], user["code"], payload["visibility"], digest, timestamp, timestamp, folder_path),
+        "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id) VALUES(?,?,?,?,?,?,1,?,?,?,?,?)",
+        (doc_id, payload["title"], payload["doc_type"], payload["topic"], user["code"], payload["visibility"], digest, timestamp, timestamp, folder_path, payload.get("folder_node_id")),
     )
     db.execute(
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
@@ -256,18 +606,20 @@ def create_document(db, user: dict, payload: dict) -> dict:
     )
     classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
     set_v2_state(db, doc_id, classification=classification, indexing_status="processing")
-    record_object_ref(db, doc_id, 1, "extracted_text", f"documents/{doc_id}/versions/1/content.txt", content.encode("utf-8"), "text/plain")
-    emit_outbox(db, "document.created", doc_id, {"version_no": 1, "classification": classification})
     audit(db, user["code"], "document.create", "document", doc_id, {"title": payload["title"]})
-    index_document(db, doc_id, 1, content)
-    sync_document(db, doc_id, path)
+    if not defer_processing:
+        record_object_ref(db, doc_id, 1, "extracted_text", f"documents/{doc_id}/versions/1/content.txt", content.encode("utf-8"), "text/plain")
+        emit_outbox(db, "document.created", doc_id, {"version_no": 1, "classification": classification})
+        index_document(db, doc_id, 1, content)
+        sync_document(db, doc_id, path)
     return dict(db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone())
 
 
-def save_file_asset(db, document_id: str, version_no: int, filename: str, mime_type: str, raw: bytes) -> dict:
-    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).name) or "upload.bin"
+def save_file_asset(db, document_id: str, version_no: int, filename: str, mime_type: str, raw: bytes, defer_processing: bool = False) -> dict:
+    safe_name = safe_filename(filename)
     document = db.execute("SELECT folder_path FROM documents WHERE id=?", (document_id,)).fetchone()
-    folder = Path(*document["folder_path"].split("/")) if document and document["folder_path"] else Path("Unsorted")
+    folder_path = safe_folder_path(document["folder_path"]) if document and document["folder_path"] else "Unsorted"
+    folder = Path(*folder_path.split("/"))
     path = STORAGE_DIR / "repository" / folder / document_id / f"v{version_no}_{safe_name}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
@@ -276,11 +628,12 @@ def save_file_asset(db, document_id: str, version_no: int, filename: str, mime_t
         "INSERT INTO file_assets VALUES(?,?,?,?,?,?,?,?)",
         (asset_id, document_id, version_no, filename, str(path), mime_type, len(raw), now()),
     )
-    record_object_ref(
-        db, document_id, version_no, "original",
-        f"documents/{document_id}/versions/{version_no}/original/{safe_name}", raw, mime_type,
-    )
-    emit_outbox(db, "document.original_stored", document_id, {"version_no": version_no, "filename": filename})
+    if not defer_processing:
+        record_object_ref(
+            db, document_id, version_no, "original",
+            f"documents/{document_id}/versions/{version_no}/original/{safe_name}", raw, mime_type,
+        )
+        emit_outbox(db, "document.original_stored", document_id, {"version_no": version_no, "filename": filename})
     return dict(db.execute("SELECT * FROM file_assets WHERE id=?", (asset_id,)).fetchone())
 
 
@@ -321,7 +674,7 @@ def extract_text(filename: str, mime_type: str, raw: bytes) -> str:
     return f"[File gốc: {filename}] Nội dung chưa được trích xuất. Cần cấu hình parser/OCR cho định dạng {suffix or mime_type}."
 
 
-def update_document(db, user: dict, document: dict, payload: dict) -> dict:
+def update_document(db, user: dict, document: dict, payload: dict, defer_processing: bool = False) -> dict:
     if document["owner_code"] != user["code"]:
         raise PermissionError("Bạn không có quyền cập nhật tài liệu này.")
     content = payload.get("content", "").strip()
@@ -333,18 +686,21 @@ def update_document(db, user: dict, document: dict, payload: dict) -> dict:
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", document["id"], version, str(path), digest, user["code"], now()),
     )
-    folder_path = payload.get("folder_path") or document.get("folder_path") or suggest_folder(db, user, payload)
+    folder_node = validate_folder_access(db, user, payload.get("folder_node_id") or document.get("folder_node_id"))
+    folder_node_id = payload.get("folder_node_id") if "folder_node_id" in payload else document.get("folder_node_id")
+    folder_path = safe_folder_path(payload.get("folder_path") or (folder_node["path"] if folder_node else None) or document.get("folder_path") or suggest_folder(db, user, payload))
     db.execute(
-        "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=? WHERE id=?",
-        (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, document["id"]),
+        "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=?,folder_node_id=? WHERE id=?",
+        (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, folder_node_id, document["id"]),
     )
     classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
     set_v2_state(db, document["id"], classification=classification, indexing_status="processing")
-    record_object_ref(db, document["id"], version, "extracted_text", f"documents/{document['id']}/versions/{version}/content.txt", content.encode("utf-8"), "text/plain")
-    emit_outbox(db, "document.version_created", document["id"], {"version_no": version})
     audit(db, user["code"], "document.update", "document", document["id"], {"version": version})
-    index_document(db, document["id"], version, content)
-    sync_document(db, document["id"], path)
+    if not defer_processing:
+        record_object_ref(db, document["id"], version, "extracted_text", f"documents/{document['id']}/versions/{version}/content.txt", content.encode("utf-8"), "text/plain")
+        emit_outbox(db, "document.version_created", document["id"], {"version_no": version})
+        index_document(db, document["id"], version, content)
+        sync_document(db, document["id"], path)
     return dict(db.execute("SELECT * FROM documents WHERE id=?", (document["id"],)).fetchone())
 
 
@@ -520,7 +876,7 @@ def index_document(db, document_id: str, version_no: int, content: str, force_lo
     for chunk in _split_chunks(content)[:200]:
         chunk_id = f"chunk-{uuid.uuid4().hex[:12]}"
         vector = ai_provider.embed(chunk, force_local=force_local)
-        indexed_external = upsert_vector(
+        indexed_external = False if force_local else upsert_vector(
             chunk_id, vector, {"document_id": document_id, "version_no": version_no}
         )
         db.execute(

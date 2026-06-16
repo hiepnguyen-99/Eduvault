@@ -9,8 +9,13 @@ import { PageHeader, Panel } from "@/components/ui";
 
 type Citation = { id: string; title: string; topic: string; version: number; visibility: string };
 type Answer = { answer: string; citations: Citation[]; scope: string };
-type HistoryItem = { question: string; result: Answer; timestamp: number };
-type Conversation = { id: string; title: string; messages: HistoryItem[]; updatedAt: number };
+type MessageItem = { question: string; result: Answer; status?: string; streaming?: boolean };
+type Conversation = { id: string; title: string; messages: MessageItem[]; updatedAt: number };
+type StreamEvent =
+  | { type: "status"; message: string }
+  | { type: "delta"; text: string }
+  | { type: "complete"; citations: Citation[]; scope: string }
+  | { type: "error"; message: string };
 
 const STORAGE_KEY = "eduvault_conversations";
 
@@ -84,7 +89,7 @@ function DocModal({ doc, token, onClose }: { doc: DocPreview; token: string; onC
   );
 }
 
-function Sources({ citations, onPreview }: { citations: Citation[]; onPreview: (id: string, title: string) => void }) {
+function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: (id: string, title: string) => void }) {
   if (!citations.length) return null;
   return (
     <div className="mt-5 border-t border-[var(--border)] pt-4">
@@ -95,8 +100,8 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview: (
             <strong className="block text-xs">{item.title}</strong>
             <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
             <div className="mt-2 flex gap-2">
-              <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>
-              <span className="text-[var(--border)]">·</span>
+              {onPreview && <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>}
+              {onPreview && <span className="text-[var(--border)]">·</span>}
               <Link href={`/documents/${item.id}`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"><ExternalLink size={11}/>Chi tiết</Link>
             </div>
           </div>
@@ -107,7 +112,7 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview: (
 }
 
 export default function Assistant() {
-  const { request, token } = useAuth();
+  const { token } = useAuth();
   const [question, setQuestion] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -140,7 +145,12 @@ export default function Assistant() {
   useEffect(() => {
     if (!initialized.current || !conversations.length) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations.slice(0, 30)));
+      // Strip streaming state before saving
+      const toSave = conversations.map(c => ({
+        ...c,
+        messages: c.messages.map(m => ({ ...m, streaming: false, status: undefined })),
+      }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave.slice(0, 30)));
     } catch { /* ignore */ }
   }, [conversations]);
 
@@ -148,8 +158,15 @@ export default function Assistant() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeId, conversations]);
 
-  const active = conversations.find(c => c.id === activeId);
-  const history = active?.messages ?? [];
+  const activeConv = conversations.find(c => c.id === activeId);
+  const messages = activeConv?.messages ?? [];
+
+  function updateMessage(convId: string, msgIndex: number, update: (m: MessageItem) => MessageItem) {
+    setConversations(prev => prev.map(c => {
+      if (c.id !== convId) return c;
+      return { ...c, messages: c.messages.map((m, i) => i === msgIndex ? update(m) : m), updatedAt: Date.now() };
+    }));
+  }
 
   function createNew() {
     const c = newConv();
@@ -176,21 +193,79 @@ export default function Assistant() {
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!question.trim()) return;
+    const q = question.trim();
+    if (!q || loading) return;
+    setQuestion("");
     setLoading(true);
     setError("");
-    const q = question;
-    setQuestion("");
+
+    const targetId = activeId;
+    let msgIndex = -1;
+
+    setConversations(prev => prev.map(c => {
+      if (c.id !== targetId) return c;
+      const isFirst = c.messages.length === 0;
+      msgIndex = c.messages.length;
+      return {
+        ...c,
+        title: isFirst ? q.slice(0, 60) : c.title,
+        messages: [...c.messages, {
+          question: q,
+          result: { answer: "", citations: [], scope: "public_or_owned" },
+          status: "Đang kết nối với trợ lý...",
+          streaming: true,
+        }],
+        updatedAt: Date.now(),
+      };
+    }));
+
     try {
-      const result = await request<Answer>("/api/search", { method: "POST", body: JSON.stringify({ question: q }) });
-      const item: HistoryItem = { question: q, result, timestamp: Date.now() };
-      setConversations(prev => prev.map(c => {
-        if (c.id !== activeId) return c;
-        const isFirst = c.messages.length === 0;
-        return { ...c, title: isFirst ? q.slice(0, 60) : c.title, messages: [...c.messages, item], updatedAt: Date.now() };
-      }));
+      const response = await fetch(`${API_URL}/api/search/stream`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q }),
+      });
+      if (!response.ok || !response.body) throw new Error(`Máy chủ trả về lỗi HTTP ${response.status}.`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = done ? "" : lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const ev = JSON.parse(line) as StreamEvent;
+          if (ev.type === "status") {
+            updateMessage(targetId, msgIndex, m => ({ ...m, status: ev.message }));
+          } else if (ev.type === "delta") {
+            updateMessage(targetId, msgIndex, m => ({
+              ...m, status: "",
+              result: { ...m.result, answer: m.result.answer + ev.text },
+            }));
+            await new Promise(r => setTimeout(r, 18));
+          } else if (ev.type === "complete") {
+            updateMessage(targetId, msgIndex, m => ({
+              ...m, streaming: false, status: "",
+              result: { ...m.result, citations: ev.citations, scope: ev.scope },
+            }));
+          } else if (ev.type === "error") {
+            throw new Error(ev.message);
+          }
+        }
+        if (done) break;
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Không thể hỏi trợ lý.");
+      const msg = err instanceof Error ? err.message : "Không thể hỏi trợ lý.";
+      setError(msg);
+      if (msgIndex >= 0) {
+        updateMessage(targetId, msgIndex, m => ({
+          ...m, streaming: false, status: "",
+          result: { ...m.result, answer: m.result.answer || msg },
+        }));
+      }
     } finally {
       setLoading(false);
     }
@@ -200,8 +275,8 @@ export default function Assistant() {
     setPreviewLoading(true);
     try {
       const [detail, provenance] = await Promise.all([
-        request<{ content: string }>(`/api/documents/${id}`),
-        request<{ files: DocPreview["files"] }>(`/api/documents/${id}/provenance`),
+        fetch(`${API_URL}/api/documents/${id}`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+        fetch(`${API_URL}/api/documents/${id}/provenance`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
       ]);
       setPreview({ id, title, content: detail.content, files: provenance.files || [] });
     } catch {
@@ -246,13 +321,19 @@ export default function Assistant() {
                 <div className="mb-2 flex items-center gap-2 font-bold text-blue-600"><Bot size={16}/>EduVault AI</div>
                 Chào bạn, mình có thể giúp <strong>tóm tắt tài liệu</strong>, giải thích nội dung khó hoặc gợi ý cách ôn tập. Bạn muốn tìm hiểu điều gì?
               </div>
-              {history.map((item, index) => (
+              {messages.map((item, index) => (
                 <div key={index} className="space-y-4">
                   <div className="ml-auto max-w-[80%] rounded-xl rounded-tr-sm bg-blue-600 p-4 text-sm text-white">{item.question}</div>
                   <div className="max-w-[95%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-5 text-sm">
-                    <div className="mb-4 flex items-center gap-2 font-bold text-blue-600"><Sparkles size={16}/>Mình đã tìm thấy nội dung phù hợp</div>
-                    <FriendlyAnswer answer={item.result.answer}/>
-                    <Sources citations={item.result.citations} onPreview={openPreview}/>
+                    <div className="mb-4 flex items-center gap-2 font-bold text-blue-600">
+                      <Sparkles size={16}/>
+                      {item.streaming ? item.status || "Đang trả lời..." : "Mình đã tìm thấy nội dung phù hợp"}
+                    </div>
+                    {item.result.answer
+                      ? <div><FriendlyAnswer answer={item.result.answer}/>{item.streaming && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-blue-600 align-middle"/>}</div>
+                      : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>
+                    }
+                    {!item.streaming && <Sources citations={item.result.citations} onPreview={openPreview}/>}
                   </div>
                 </div>
               ))}
@@ -268,7 +349,7 @@ export default function Assistant() {
               <input
                 className="field"
                 value={question}
-                onChange={event => setQuestion(event.target.value)}
+                onChange={e => setQuestion(e.target.value)}
                 placeholder="Ví dụ: Giải thích các bước xây dựng hệ thống RAG..."
               />
               <button disabled={loading} className="btn-primary" aria-label="Gửi">

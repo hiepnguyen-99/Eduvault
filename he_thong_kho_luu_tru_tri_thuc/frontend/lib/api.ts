@@ -7,6 +7,7 @@ export type User = {
   name: string;
   role: "lecturer" | "new_lecturer" | "head" | "admin";
   department: string;
+  permissions: string[];
 };
 
 export type Document = {
@@ -20,6 +21,7 @@ export type Document = {
   created_at: string;
   updated_at: string;
   folder_path: string;
+  folder_node_id?: string;
   owner_anonymous?: boolean;
   v2_state?: {
     classification: string;
@@ -42,6 +44,51 @@ export type V2Status = {
   services: Record<string, { provider: string; configured: boolean; available: boolean; detail?: string }>;
   objects: { provider: string; count: number; size: number }[];
   outbox: { status: string; count: number }[];
+};
+
+export type FolderNode = {
+  id: string;
+  name: string;
+  parent_id?: string;
+  type: "department" | "specialization" | "folder";
+  policy_id: string;
+  path: string;
+  status: "active" | "deprecated";
+  children: FolderNode[];
+};
+
+export type PolicyFile = {
+  id: string;
+  title: string;
+  file_path: string;
+  status: "draft" | "active" | "archived";
+  raw_text: string;
+  parsed_json: { department: string; specializations: { name: string; folders: string[] }[] };
+  created_by: string;
+  created_at: string;
+  activated_at?: string;
+};
+
+export type MyFolderTree = {
+  policy: PolicyFile | null;
+  name: string;
+  children: FolderNode[];
+  message?: string;
+};
+
+export type Specialization = {
+  id: string;
+  name: string;
+  description: string;
+  policy_id: string;
+  folder_node_id: string;
+};
+
+export type ProfileSpecializations = {
+  policy: PolicyFile | null;
+  available: Specialization[];
+  selected_ids: string[];
+  message?: string;
 };
 
 export type DocumentDetail = Document & {
