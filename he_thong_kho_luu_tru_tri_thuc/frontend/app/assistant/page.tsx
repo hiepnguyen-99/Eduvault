@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, ReactNode, useEffect, useRef, useState } from "react";
-import { Bot, Download, ExternalLink, FileText, LoaderCircle, MessageSquare, Plus, Send, Sparkles, X } from "lucide-react";
+import { Bot, Download, ExternalLink, FileText, LoaderCircle, MessageSquare, Plus, Send, Sparkles, Trash2, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { API_URL } from "@/lib/api";
 import { PageHeader, Panel } from "@/components/ui";
@@ -10,8 +10,13 @@ import { PageHeader, Panel } from "@/components/ui";
 type Citation = { id: string; title: string; topic: string; version: number; visibility: string };
 type Answer = { answer: string; citations: Citation[]; scope: string };
 type HistoryItem = { question: string; result: Answer; timestamp: number };
+type Conversation = { id: string; title: string; messages: HistoryItem[]; updatedAt: number };
 
-const STORAGE_KEY = "eduvault_chat_history";
+const STORAGE_KEY = "eduvault_conversations";
+
+function newConv(): Conversation {
+  return { id: crypto.randomUUID(), title: "Cuộc hội thoại mới", messages: [], updatedAt: Date.now() };
+}
 
 function InlineMarkdown({ text }: { text: string }) {
   const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
@@ -26,13 +31,11 @@ function FriendlyAnswer({ answer }: { answer: string }) {
   const lines = answer.split("\n");
   const blocks: ReactNode[] = [];
   let bullets: string[] = [];
-
   function flushBullets() {
     if (!bullets.length) return;
     blocks.push(<ul key={`list-${blocks.length}`} className="space-y-2 pl-1">{bullets.map((item, index) => <li key={index} className="flex gap-2"><span className="mt-0.5 text-blue-600">•</span><span><InlineMarkdown text={item}/></span></li>)}</ul>);
     bullets = [];
   }
-
   lines.forEach((raw, index) => {
     const line = raw.trim();
     if (!line) { flushBullets(); return; }
@@ -48,12 +51,7 @@ function FriendlyAnswer({ answer }: { answer: string }) {
   return <div className="space-y-3">{blocks}</div>;
 }
 
-type DocPreview = {
-  id: string;
-  title: string;
-  content: string;
-  files: { id: string; original_name: string; mime_type: string; size: number }[];
-};
+type DocPreview = { id: string; title: string; content: string; files: { id: string; original_name: string; mime_type: string; size: number }[] };
 
 function DocModal({ doc, token, onClose }: { doc: DocPreview; token: string; onClose: () => void }) {
   async function download(assetId: string, name: string) {
@@ -63,36 +61,23 @@ function DocModal({ doc, token, onClose }: { doc: DocPreview; token: string; onC
     const a = document.createElement("a"); a.href = url; a.download = name; a.click();
     URL.revokeObjectURL(url);
   }
-
   return (
     <div className="fixed inset-0 z-[80] bg-slate-950/60 p-4 flex items-center justify-center" onClick={onClose}>
       <div className="app-card w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 border-b border-[var(--border)] p-4">
-          <div>
-            <p className="eyebrow">Xem nội dung tài liệu</p>
-            <h2 className="mt-0.5 text-base font-bold">{doc.title}</h2>
-          </div>
+          <div><p className="eyebrow">Xem nội dung tài liệu</p><h2 className="mt-0.5 text-base font-bold">{doc.title}</h2></div>
           <div className="flex shrink-0 items-center gap-2">
             <Link href={`/documents/${doc.id}`} className="btn-secondary text-xs flex items-center gap-1"><ExternalLink size={13}/>Mở trang chi tiết</Link>
             <button className="icon-btn" onClick={onClose}><X size={17}/></button>
           </div>
         </div>
-
         {doc.files.length > 0 && (
           <div className="border-b border-[var(--border)] bg-[var(--soft)] px-4 py-3 flex flex-wrap gap-2">
-            {doc.files.map(f => (
-              <button key={f.id} onClick={() => download(f.id, f.original_name)} className="btn-secondary flex items-center gap-1.5 text-xs">
-                <Download size={13}/>{f.original_name}
-              </button>
-            ))}
+            {doc.files.map(f => <button key={f.id} onClick={() => download(f.id, f.original_name)} className="btn-secondary flex items-center gap-1.5 text-xs"><Download size={13}/>{f.original_name}</button>)}
           </div>
         )}
-
         <div className="flex-1 overflow-auto p-5">
-          {doc.content
-            ? <pre className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--text)]">{doc.content}</pre>
-            : <p className="muted text-xs">Tài liệu này chưa có nội dung văn bản được trích xuất.</p>
-          }
+          {doc.content ? <pre className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--text)]">{doc.content}</pre> : <p className="muted text-xs">Tài liệu này chưa có nội dung văn bản được trích xuất.</p>}
         </div>
       </div>
     </div>
@@ -103,20 +88,16 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview: (
   if (!citations.length) return null;
   return (
     <div className="mt-5 border-t border-[var(--border)] pt-4">
-      <p className="mb-3 flex items-center gap-2 text-xs font-bold"><FileText className="text-blue-600" size={15}/>📄 Nguồn tham khảo</p>
+      <p className="mb-3 flex items-center gap-2 text-xs font-bold"><FileText className="text-blue-600" size={15}/>Nguồn tham khảo</p>
       <div className="grid gap-2 sm:grid-cols-2">
         {citations.map(item => (
           <div key={item.id} className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
             <strong className="block text-xs">{item.title}</strong>
             <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
             <div className="mt-2 flex gap-2">
-              <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline">
-                <FileText size={11}/>Xem nội dung
-              </button>
+              <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>
               <span className="text-[var(--border)]">·</span>
-              <Link href={`/documents/${item.id}`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600">
-                <ExternalLink size={11}/>Chi tiết
-              </Link>
+              <Link href={`/documents/${item.id}`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"><ExternalLink size={11}/>Chi tiết</Link>
             </div>
           </div>
         ))}
@@ -128,46 +109,86 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview: (
 export default function Assistant() {
   const { request, token } = useAuth();
   const [question, setQuestion] = useState("");
-  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<DocPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const historyLoaded = useRef(false);
+  const initialized = useRef(false);
 
-  // Load history from localStorage on mount
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) setHistory(JSON.parse(saved));
+      if (saved) {
+        const convs: Conversation[] = JSON.parse(saved);
+        if (convs.length) {
+          setConversations(convs);
+          setActiveId(convs[0].id);
+          initialized.current = true;
+          return;
+        }
+      }
     } catch { /* ignore */ }
-    historyLoaded.current = true;
+    const first = newConv();
+    setConversations([first]);
+    setActiveId(first.id);
+    initialized.current = true;
   }, []);
 
-  // Save history to localStorage whenever it changes
   useEffect(() => {
-    if (!historyLoaded.current) return;
+    if (!initialized.current || !conversations.length) return;
     try {
-      // Keep last 50 conversations to avoid bloating localStorage
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(history.slice(-50)));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations.slice(0, 30)));
     } catch { /* ignore */ }
-  }, [history]);
+  }, [conversations]);
 
-  // Auto-scroll to bottom on new message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history]);
+  }, [activeId, conversations]);
+
+  const active = conversations.find(c => c.id === activeId);
+  const history = active?.messages ?? [];
+
+  function createNew() {
+    const c = newConv();
+    setConversations(prev => [c, ...prev]);
+    setActiveId(c.id);
+    setError("");
+    setQuestion("");
+  }
+
+  function deleteConv(id: string) {
+    setConversations(prev => {
+      const next = prev.filter(c => c.id !== id);
+      if (id === activeId) {
+        if (next.length) setActiveId(next[0].id);
+        else {
+          const fresh = newConv();
+          setActiveId(fresh.id);
+          return [fresh];
+        }
+      }
+      return next;
+    });
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!question.trim()) return;
     setLoading(true);
     setError("");
+    const q = question;
+    setQuestion("");
     try {
-      const result = await request<Answer>("/api/search", { method: "POST", body: JSON.stringify({ question }) });
-      setHistory(items => [...items, { question, result, timestamp: Date.now() }]);
-      setQuestion("");
+      const result = await request<Answer>("/api/search", { method: "POST", body: JSON.stringify({ question: q }) });
+      const item: HistoryItem = { question: q, result, timestamp: Date.now() };
+      setConversations(prev => prev.map(c => {
+        if (c.id !== activeId) return c;
+        const isFirst = c.messages.length === 0;
+        return { ...c, title: isFirst ? q.slice(0, 60) : c.title, messages: [...c.messages, item], updatedAt: Date.now() };
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Không thể hỏi trợ lý.");
     } finally {
@@ -190,42 +211,31 @@ export default function Assistant() {
     }
   }
 
-  function clearHistory() {
-    if (!confirm("Xóa toàn bộ lịch sử hội thoại?")) return;
-    setHistory([]);
-    localStorage.removeItem(STORAGE_KEY);
-  }
-
   return (
     <div>
       <PageHeader
         eyebrow="Trợ lý tri thức AI"
         title="Hỏi đáp trên kho tri thức"
         description="Hỏi tự nhiên như đang trao đổi với một trợ lý hiểu tài liệu của bạn."
-        actions={
-          <div className="flex gap-2">
-            {history.length > 0 && <button className="btn-secondary" onClick={clearHistory}>Xóa lịch sử</button>}
-            <button className="btn-primary" onClick={() => { setHistory([]); localStorage.removeItem(STORAGE_KEY); }}><Plus size={15}/>Cuộc hội thoại mới</button>
-          </div>
-        }
+        actions={<button className="btn-primary" onClick={createNew}><Plus size={15}/>Cuộc hội thoại mới</button>}
       />
       <div className="grid min-h-[680px] gap-4 xl:grid-cols-[240px_minmax(0,1fr)]">
-        <Panel title={`Lịch sử (${history.length})`}>
-          <div className="p-2 max-h-[70vh] overflow-auto">
-            {history.map((item, index) => (
-              <button
-                key={index}
-                onClick={() => bottomRef.current?.scrollIntoView()}
-                className="flex w-full gap-2 rounded-lg p-2.5 text-left text-xs hover:bg-[var(--soft)]"
-              >
-                <MessageSquare size={14} className="mt-0.5 shrink-0 text-blue-500"/>
-                <div className="min-w-0">
-                  <span className="block truncate">{item.question}</span>
-                  <span className="muted text-[10px]">{new Date(item.timestamp).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
-                </div>
-              </button>
+        <Panel title={`Lịch sử (${conversations.length})`}>
+          <div className="p-2 max-h-[70vh] overflow-auto space-y-0.5">
+            {conversations.map(c => (
+              <div key={c.id} className={`group flex items-start gap-1 rounded-lg px-2 py-2 ${c.id === activeId ? "bg-blue-50 dark:bg-blue-950/30" : "hover:bg-[var(--soft)]"}`}>
+                <button className="flex min-w-0 flex-1 gap-2 text-left" onClick={() => { setActiveId(c.id); setError(""); }}>
+                  <MessageSquare size={14} className={`mt-0.5 shrink-0 ${c.id === activeId ? "text-blue-600" : "text-[var(--muted)]"}`}/>
+                  <div className="min-w-0">
+                    <span className={`block truncate text-xs font-medium ${c.id === activeId ? "text-blue-700" : ""}`}>{c.title}</span>
+                    <span className="muted text-[10px]">{c.messages.length} tin · {new Date(c.updatedAt).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+                  </div>
+                </button>
+                <button onClick={() => deleteConv(c.id)} className="mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-[var(--muted)] hover:text-red-500" title="Xóa">
+                  <Trash2 size={13}/>
+                </button>
+              </div>
             ))}
-            {!history.length && <p className="muted p-3 text-xs">Chưa có câu hỏi.</p>}
           </div>
         </Panel>
 

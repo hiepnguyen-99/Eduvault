@@ -115,7 +115,9 @@ export default function Backup() {
           {connection.last_error && <p className="mt-2 text-[10px] text-red-600">{connection.last_error}</p>}
           {!connection.configured && (
             <p className="mt-2 rounded bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-              Chưa cấu hình OAuth — cần thêm <code className="font-mono">GOOGLE_CLIENT_ID</code>, <code className="font-mono">GOOGLE_CLIENT_SECRET</code>, <code className="font-mono">GOOGLE_REDIRECT_URI</code> vào file <code className="font-mono">.env</code>.
+              {connection.provider === "google_drive"
+                ? <>Chưa cấu hình OAuth — cần thêm <code className="font-mono">GOOGLE_CLIENT_ID</code>, <code className="font-mono">GOOGLE_CLIENT_SECRET</code>, <code className="font-mono">GOOGLE_REDIRECT_URI</code> vào file <code className="font-mono">.env</code>.</>
+                : <>Chưa cấu hình OAuth — cần thêm <code className="font-mono">MICROSOFT_CLIENT_ID</code>, <code className="font-mono">MICROSOFT_CLIENT_SECRET</code>, <code className="font-mono">MICROSOFT_REDIRECT_URI</code> vào file <code className="font-mono">.env</code>.</>}
             </p>
           )}
           <div className="mt-4 flex gap-2">
