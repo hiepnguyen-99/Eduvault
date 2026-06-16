@@ -6,7 +6,7 @@ import { useBackendData } from "@/lib/hooks";
 import { Metric, PageHeader, Panel } from "@/components/ui";
 type PermissionData={readable:Document[];editable:Document[];restricted:Document[]};
 const emptyP:PermissionData={readable:[],editable:[],restricted:[]};
-const emptyD:DashboardData={user:{code:"",name:"",role:"lecturer",department:""},stats:{documents:0,private:0,topics:0},documents:[],requests:[],backups:[],audit:[]};
+const emptyD:DashboardData={user:{code:"",name:"",role:"lecturer",department:"",permissions:[]},stats:{documents:0,private:0,topics:0},documents:[],requests:[],backups:[],audit:[]};
 export default function Permissions() {
   const {request,user}=useAuth();const {data:p,reload}=useBackendData("/api/permissions",emptyP);const {data:d,reload:reloadD}=useBackendData("/api/dashboard",emptyD);
   async function ask(id:string){await request(`/api/access-requests/${id}`,{method:"POST"});await reload();await reloadD();}

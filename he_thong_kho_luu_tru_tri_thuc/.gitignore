@@ -6,4 +6,5 @@ data/mvp/
 .env
 client_secret_*.json
 .env.example
+.publish_repo/
 !frontend/.env.example

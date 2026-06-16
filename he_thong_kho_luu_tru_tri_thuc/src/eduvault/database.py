@@ -113,6 +113,8 @@ def connect():
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA journal_mode = WAL")
+    db.execute("PRAGMA busy_timeout = 30000")
     return db
 
 
@@ -151,6 +153,7 @@ CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY, title TEXT NOT NULL, doc_type TEXT NOT NULL, topic TEXT NOT NULL,
   owner_code TEXT NOT NULL, visibility TEXT NOT NULL, current_version INTEGER NOT NULL,
   content_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  folder_node_id TEXT,
   FOREIGN KEY(owner_code) REFERENCES users(code)
 );
 CREATE TABLE IF NOT EXISTS versions (
@@ -181,6 +184,28 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE TABLE IF NOT EXISTS policies (
   key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS policy_files (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, file_path TEXT NOT NULL, status TEXT NOT NULL,
+  raw_text TEXT NOT NULL, parsed_json TEXT NOT NULL, created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL, activated_at TEXT,
+  FOREIGN KEY(created_by) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS folder_nodes (
+  id TEXT PRIMARY KEY, policy_id TEXT NOT NULL, name TEXT NOT NULL, parent_id TEXT,
+  type TEXT NOT NULL, path TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  FOREIGN KEY(policy_id) REFERENCES policy_files(id)
+);
+CREATE TABLE IF NOT EXISTS specializations (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  policy_id TEXT NOT NULL, folder_node_id TEXT NOT NULL,
+  FOREIGN KEY(policy_id) REFERENCES policy_files(id), FOREIGN KEY(folder_node_id) REFERENCES folder_nodes(id)
+);
+CREATE TABLE IF NOT EXISTS lecturer_specializations (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, specialization_id TEXT NOT NULL, created_at TEXT NOT NULL,
+  UNIQUE(user_code, specialization_id),
+  FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(specialization_id) REFERENCES specializations(id)
 );
 CREATE TABLE IF NOT EXISTS backup_logs (
   id TEXT PRIMARY KEY, storage_path TEXT NOT NULL, status TEXT NOT NULL,
@@ -240,6 +265,13 @@ CREATE TABLE IF NOT EXISTS outbox_events (
   payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, published_at TEXT
 );
+CREATE TABLE IF NOT EXISTS upload_tasks (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL,
+  total_bytes INTEGER NOT NULL, uploaded_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+  metadata TEXT NOT NULL, temp_path TEXT NOT NULL, document_id TEXT, error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 """
 
 MYSQL_SCHEMA = """
@@ -255,7 +287,7 @@ CREATE TABLE IF NOT EXISTS documents (
   id VARCHAR(64) PRIMARY KEY, title VARCHAR(200) NOT NULL, doc_type VARCHAR(80) NOT NULL, topic VARCHAR(120) NOT NULL,
   owner_code VARCHAR(30) NOT NULL, visibility VARCHAR(20) NOT NULL, current_version INT NOT NULL,
   content_hash VARCHAR(64) NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
-  folder_path VARCHAR(1000) NOT NULL DEFAULT '', deleted_at VARCHAR(40) NULL,
+  folder_path VARCHAR(1000) NOT NULL DEFAULT '', folder_node_id VARCHAR(64) NULL, deleted_at VARCHAR(40) NULL,
   INDEX idx_documents_hash(content_hash), FOREIGN KEY(owner_code) REFERENCES users(code)
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS versions (
@@ -284,6 +316,29 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   resource_type VARCHAR(80) NOT NULL, resource_id VARCHAR(128), detail LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS policies ( `key` VARCHAR(100) PRIMARY KEY, value LONGTEXT NOT NULL, updated_at VARCHAR(40) NOT NULL ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS policy_files (
+  id VARCHAR(64) PRIMARY KEY, title VARCHAR(200) NOT NULL, file_path TEXT NOT NULL, status VARCHAR(30) NOT NULL,
+  raw_text LONGTEXT NOT NULL, parsed_json LONGTEXT NOT NULL, created_by VARCHAR(30) NOT NULL,
+  created_at VARCHAR(40) NOT NULL, activated_at VARCHAR(40),
+  INDEX idx_policy_files_status(status), FOREIGN KEY(created_by) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS folder_nodes (
+  id VARCHAR(64) PRIMARY KEY, policy_id VARCHAR(64) NOT NULL, name VARCHAR(200) NOT NULL, parent_id VARCHAR(64),
+  type VARCHAR(30) NOT NULL, path VARCHAR(1000) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'active',
+  created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  INDEX idx_folder_nodes_policy(policy_id), FOREIGN KEY(policy_id) REFERENCES policy_files(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS specializations (
+  id VARCHAR(64) PRIMARY KEY, name VARCHAR(200) NOT NULL, description TEXT NOT NULL,
+  policy_id VARCHAR(64) NOT NULL, folder_node_id VARCHAR(64) NOT NULL,
+  INDEX idx_specializations_policy(policy_id), FOREIGN KEY(policy_id) REFERENCES policy_files(id),
+  FOREIGN KEY(folder_node_id) REFERENCES folder_nodes(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS lecturer_specializations (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, specialization_id VARCHAR(64) NOT NULL, created_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY uq_lecturer_specialization(user_code, specialization_id),
+  FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS backup_logs ( id VARCHAR(64) PRIMARY KEY, storage_path TEXT NOT NULL, status VARCHAR(30) NOT NULL, created_by VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS courses ( code VARCHAR(30) PRIMARY KEY, name VARCHAR(200) NOT NULL, required_doc_types LONGTEXT NOT NULL ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS transfers (
@@ -315,6 +370,13 @@ CREATE TABLE IF NOT EXISTS outbox_events (
   payload LONGTEXT NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'pending',
   attempts INT NOT NULL DEFAULT 0, created_at VARCHAR(40) NOT NULL, published_at VARCHAR(40)
 ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS upload_tasks (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, filename TEXT NOT NULL, mime_type VARCHAR(255) NOT NULL,
+  total_bytes BIGINT NOT NULL, uploaded_bytes BIGINT NOT NULL DEFAULT 0, status VARCHAR(40) NOT NULL,
+  metadata LONGTEXT NOT NULL, temp_path TEXT NOT NULL, document_id VARCHAR(64), error TEXT,
+  created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  INDEX idx_upload_tasks_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
 """
 
 
@@ -342,8 +404,14 @@ def init_database() -> None:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(documents)").fetchall()}
             if "folder_path" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''")
+            if "folder_node_id" not in columns:
+                db.execute("ALTER TABLE documents ADD COLUMN folder_node_id TEXT")
             if "deleted_at" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN deleted_at TEXT")
+        else:
+            doc_columns = {row["Field"] for row in db.execute("SHOW COLUMNS FROM documents").fetchall()}
+            if "folder_node_id" not in doc_columns:
+                db.execute("ALTER TABLE documents ADD COLUMN folder_node_id VARCHAR(64) NULL")
         for code, name, role, department in SEED_USERS:
             db.execute(
                 "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, 1)",
@@ -414,7 +482,7 @@ def init_database() -> None:
             digest = hash_secret(content)
             timestamp = now()
             db.execute(
-                "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '')",
+                "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '', NULL)",
                 (doc_id, title, doc_type, topic, owner, visibility, digest, timestamp, timestamp),
             )
             db.execute(
@@ -438,7 +506,8 @@ SNAPSHOT_TABLES = [
     "access_requests", "audit_logs", "policies", "backup_logs", "courses",
     "transfers", "external_storages", "sync_logs", "cloud_connections",
     "oauth_states", "cloud_sync_logs",
-    "document_v2_state", "object_refs", "outbox_events",
+    "document_v2_state", "object_refs", "outbox_events", "upload_tasks",
+    "policy_files", "folder_nodes", "specializations", "lecturer_specializations",
 ]
 
 
