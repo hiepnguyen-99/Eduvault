@@ -1,5 +1,8 @@
 "use client";
-import { BookOpen, ChevronLeft, Download, FileText, Highlighter, Languages, LoaderCircle, MessageSquareText, Send, Sparkles } from "lucide-react";
+import {
+  BookOpen, ChevronLeft, Download, FileText, Highlighter,
+  Languages, LoaderCircle, MessageSquareText, Send, Sparkles,
+} from "lucide-react";
 import Link from "next/link";
 import { useRef, useState } from "react";
 import { useParams } from "next/navigation";
@@ -9,6 +12,8 @@ import { useBackendData } from "@/lib/hooks";
 import { PageHeader, Panel } from "@/components/ui";
 import ReactMarkdown from "react-markdown";
 
+const STORAGE_KEY = "eduvault_conversations";
+
 type Provenance = {
   document: Document;
   versions: { id: string; version_no: number; created_by: string; created_at: string }[];
@@ -17,7 +22,8 @@ type Provenance = {
   access: { type: "public" | "owner" | "approved_request"; request_id: string | null };
 };
 
-type ChatMsg = { role: "user" | "ai"; text: string };
+type Citation = { id: string; title: string; topic: string; current_version: number };
+type ChatItem = { question: string; answer: string; citations: Citation[]; isPreset?: boolean };
 
 const empty: Provenance = {
   document: { id: "", title: "", doc_type: "", topic: "", owner_code: "", visibility: "public", current_version: 0, created_at: "", updated_at: "", folder_path: "" },
@@ -25,32 +31,54 @@ const empty: Provenance = {
   access: { type: "public", request_id: null },
 };
 
+function saveConvToStorage(convId: string, title: string, items: ChatItem[]) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    const msgs = items.map(item => ({
+      question: item.question,
+      result: { answer: item.answer, citations: item.citations, scope: "accessible" },
+    }));
+    const entry = { id: convId, title, messages: msgs, updatedAt: Date.now() };
+    const idx = stored.findIndex((c: { id: string }) => c.id === convId);
+    if (idx >= 0) stored[idx] = entry;
+    else stored.unshift(entry);
+    if (stored.length > 30) stored.length = 30;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  } catch {}
+}
+
 export default function DocumentViewer() {
   const { id } = useParams<{ id: string }>();
   const { token, request } = useAuth();
   const { data, error } = useBackendData<Provenance>(`/api/documents/${id}/provenance`, empty);
 
-  const [aiResult, setAiResult] = useState<{ answer: string; citations: { id: string; title: string; topic: string; current_version: number }[] } | null>(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
   const [aiAction, setAiAction] = useState("");
-
-  const [chat, setChat] = useState<ChatMsg[]>([]);
+  const [chat, setChat] = useState<ChatItem[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState("");
+  const [convId, setConvId] = useState<string | null>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
   async function askAI(action: string, prompt: string) {
-    setAiAction(action); setAiLoading(true); setAiError(""); setAiResult(null);
+    setAiAction(action);
+    setChat([]);
+    setChatError("");
+    setChatLoading(true);
+    const newId = crypto.randomUUID();
+    setConvId(newId);
     try {
-      const r = await request<{ answer: string; citations: { id: string; title: string; topic: string; current_version: number }[] }>(
+      const r = await request<{ answer: string; citations: Citation[] }>(
         "/api/search", { method: "POST", body: JSON.stringify({ question: prompt }) }
       );
-      setAiResult(r);
+      const item: ChatItem = { question: action, answer: r.answer, citations: r.citations, isPreset: true };
+      setChat([item]);
+      saveConvToStorage(newId, `${action} · ${data.document.title}`, [item]);
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : "Không thể thực hiện.");
+      setChatError(err instanceof Error ? err.message : "Không thể thực hiện.");
+      setConvId(null);
     } finally {
-      setAiLoading(false);
+      setChatLoading(false);
     }
   }
 
@@ -59,19 +87,25 @@ export default function DocumentViewer() {
     const q = chatInput.trim();
     if (!q || chatLoading) return;
     setChatInput("");
-    setChat(prev => [...prev, { role: "user", text: q }]);
+    setChatError("");
     setChatLoading(true);
+    const currentId = convId ?? (() => { const n = crypto.randomUUID(); setConvId(n); return n; })();
     try {
       const prompt = `Liên quan đến tài liệu "${data.document.title}" (chủ đề: ${data.document.topic}): ${q}`;
-      const r = await request<{ answer: string; citations: unknown[] }>(
+      const r = await request<{ answer: string; citations: Citation[] }>(
         "/api/search", { method: "POST", body: JSON.stringify({ question: prompt }) }
       );
-      setChat(prev => [...prev, { role: "ai", text: r.answer }]);
+      setChat(prev => {
+        const updated = [...prev, { question: q, answer: r.answer, citations: r.citations }];
+        const title = aiAction ? `${aiAction} · ${data.document.title}` : `Hỏi về ${data.document.title}`;
+        saveConvToStorage(currentId, title, updated);
+        return updated;
+      });
+      setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (err) {
-      setChat(prev => [...prev, { role: "ai", text: err instanceof Error ? err.message : "Lỗi không xác định." }]);
+      setChatError(err instanceof Error ? err.message : "Lỗi không xác định.");
     } finally {
       setChatLoading(false);
-      setTimeout(() => chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     }
   }
 
@@ -90,6 +124,15 @@ export default function DocumentViewer() {
     </div>
   );
 
+  const presets = [
+    { title: "Tóm tắt", icon: <MessageSquareText size={16}/>, prompt: `Tóm tắt ngắn gọn các nội dung chính, ý chính và điểm nổi bật của tài liệu "${data.document.title}" thuộc chủ đề ${data.document.topic}. Trình bày theo dạng gạch đầu dòng.` },
+    { title: "Giải thích", icon: <BookOpen size={16}/>, prompt: `Tài liệu "${data.document.title}" là gì? Giải thích mục đích, đối tượng sử dụng, cấu trúc và nội dung chính của tài liệu ${data.document.doc_type} này về chủ đề ${data.document.topic}.` },
+    { title: "Trích CLO", icon: <Highlighter size={16}/>, prompt: `Liệt kê toàn bộ Chuẩn đầu ra học phần (CLO), mục tiêu học tập và năng lực đạt được liên quan đến chủ đề "${data.document.topic}" trong kho tri thức. Nếu tài liệu "${data.document.title}" có CLO thì trích từ đó, nếu không thì lấy từ tài liệu liên quan. Đánh số từng CLO rõ ràng.` },
+    { title: "FAQ", icon: <FileText size={16}/>, prompt: `Dựa trên nội dung trong kho tri thức về chủ đề "${data.document.topic}" (đặc biệt từ tài liệu "${data.document.title}"), hãy tạo 5 câu hỏi thường gặp (FAQ) kèm câu trả lời chi tiết.` },
+    { title: "Dịch", icon: <Languages size={16}/>, prompt: `Dịch tiêu đề, mục tiêu và các điểm nội dung quan trọng của tài liệu "${data.document.title}" từ tiếng Việt sang tiếng Anh.` },
+    { title: "Liên quan", icon: <Sparkles size={16}/>, prompt: `Tìm và liệt kê các tài liệu khác trong kho tri thức có nội dung liên quan đến chủ đề "${data.document.topic}" hoặc bổ sung cho tài liệu "${data.document.title}".` },
+  ];
+
   return (
     <div>
       <PageHeader
@@ -103,7 +146,7 @@ export default function DocumentViewer() {
         <p className="mb-4 rounded bg-blue-50 p-3 text-xs text-blue-800">Bạn đang xem tài liệu riêng tư này nhờ yêu cầu truy cập đã được chủ sở hữu phê duyệt.</p>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_300px]">
+      <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_280px]">
         {/* Left: Versions */}
         <Panel title="Phiên bản">
           <div className="p-2">
@@ -116,7 +159,7 @@ export default function DocumentViewer() {
           </div>
         </Panel>
 
-        {/* Center: Document info + AI result */}
+        {/* Center: Document info + AI chat */}
         <div className="app-card p-6 md:p-10">
           <div className="mx-auto max-w-3xl">
             <span className={`badge ${data.document.visibility === "public" ? "badge-green" : "badge-amber"}`}>
@@ -132,6 +175,7 @@ export default function DocumentViewer() {
                 </div>
               ))}
             </div>
+
             <h3 className="section-title mt-8">Tệp gốc</h3>
             <div className="mt-3 space-y-2">
               {data.files.map(x => (
@@ -147,19 +191,46 @@ export default function DocumentViewer() {
               {!data.files.length && <p className="muted text-xs">Tài liệu này chưa có tệp gốc.</p>}
             </div>
 
-            {(aiLoading || aiError || aiResult) && (
-              <div className="mt-8">
-                <h3 className="section-title">{aiAction}</h3>
-                <div className="mt-3">
-                  {aiLoading && <div className="flex items-center gap-2 text-sm text-blue-600"><LoaderCircle size={16} className="animate-spin"/>Đang thực hiện...</div>}
-                  {aiError && <p className="rounded bg-red-50 p-3 text-sm text-red-700">{aiError}</p>}
-                  {aiResult && (
-                    <div>
-                      <div className="ai-result"><ReactMarkdown>{aiResult.answer}</ReactMarkdown></div>
-                      {aiResult.citations.length > 0 && (
+            {/* AI Chat section */}
+            <div className="mt-8">
+              <div className="flex items-center justify-between">
+                <h3 className="section-title">{aiAction || "Trợ lý AI"}</h3>
+                {aiAction && (
+                  <span className="muted text-[10px]">Lưu vào lịch sử trợ lý</span>
+                )}
+              </div>
+
+              {/* Loading state for first request */}
+              {chatLoading && chat.length === 0 && (
+                <div className="mt-4 flex items-center gap-2 text-sm text-blue-600">
+                  <LoaderCircle size={16} className="animate-spin"/>Đang thực hiện...
+                </div>
+              )}
+
+              {chatError && <p className="mt-4 rounded bg-red-50 p-3 text-sm text-red-700">{chatError}</p>}
+
+              {/* Chat thread */}
+              {chat.length > 0 && (
+                <div className="mt-4 space-y-6">
+                  {chat.map((item, i) => (
+                    <div key={i}>
+                      {/* User bubble — skip for preset (first message), show for follow-up */}
+                      {!item.isPreset && (
+                        <div className="mb-3 flex justify-end">
+                          <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-2 text-sm text-white">
+                            {item.question}
+                          </div>
+                        </div>
+                      )}
+                      {/* AI answer */}
+                      <div className="ai-result">
+                        <ReactMarkdown>{item.answer}</ReactMarkdown>
+                      </div>
+                      {/* Citations — show only for first message */}
+                      {item.citations.length > 0 && i === 0 && (
                         <div className="mt-4 border-t border-[var(--border)] pt-3">
                           <p className="muted mb-2 text-[10px] uppercase font-bold">Nguồn tham khảo</p>
-                          {aiResult.citations.map(c => (
+                          {item.citations.map(c => (
                             <Link key={c.id} href={`/documents/${c.id}`} className="mt-1 flex items-center gap-1 text-xs text-blue-600 hover:underline">
                               <FileText size={12}/>{c.title}
                             </Link>
@@ -167,80 +238,60 @@ export default function DocumentViewer() {
                         </div>
                       )}
                     </div>
+                  ))}
+
+                  {/* Loading for follow-up */}
+                  {chatLoading && chat.length > 0 && (
+                    <div className="flex items-center gap-2 text-sm text-blue-500">
+                      <LoaderCircle size={14} className="animate-spin"/>Đang trả lời...
+                    </div>
                   )}
+                  <div ref={chatBottomRef}/>
                 </div>
-              </div>
-            )}
-          </div>
-        </div>
+              )}
 
-        {/* Right: AI panel + Chat */}
-        <div className="flex flex-col gap-4">
-          <Panel title="Trợ lý AI">
-            <div className="p-3">
-              <div className="rounded-xl bg-gradient-to-br from-blue-700 to-indigo-800 p-4 text-white">
-                <Sparkles size={18}/>
-                <strong className="mt-3 block text-sm">Thông tin nguồn gốc</strong>
-                <p className="mt-1 text-[11px] text-blue-100">{data.sync_history.length} lần đồng bộ được ghi nhận.</p>
-              </div>
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                {[
-                  { title: "Tóm tắt", icon: <MessageSquareText size={16}/>, prompt: `Tóm tắt ngắn gọn các nội dung chính, ý chính và điểm nổi bật của tài liệu "${data.document.title}" thuộc chủ đề ${data.document.topic}. Trình bày theo dạng gạch đầu dòng.` },
-                  { title: "Giải thích", icon: <BookOpen size={16}/>, prompt: `Tài liệu "${data.document.title}" là gì? Giải thích mục đích, đối tượng sử dụng, cấu trúc và nội dung chính của tài liệu ${data.document.doc_type} này về chủ đề ${data.document.topic}.` },
-                  { title: "Trích CLO", icon: <Highlighter size={16}/>, prompt: `Liệt kê toàn bộ Chuẩn đầu ra học phần (CLO), mục tiêu học tập và năng lực đạt được liên quan đến chủ đề "${data.document.topic}" trong kho tri thức. Nếu tài liệu "${data.document.title}" có CLO thì trích từ đó, nếu không thì lấy từ tài liệu liên quan. Đánh số từng CLO rõ ràng.` },
-                  { title: "FAQ", icon: <FileText size={16}/>, prompt: `Dựa trên nội dung trong kho tri thức về chủ đề "${data.document.topic}" (đặc biệt từ tài liệu "${data.document.title}"), hãy tạo 5 câu hỏi thường gặp (FAQ) kèm câu trả lời chi tiết.` },
-                  { title: "Dịch", icon: <Languages size={16}/>, prompt: `Dịch tiêu đề, mục tiêu và các điểm nội dung quan trọng của tài liệu "${data.document.title}" từ tiếng Việt sang tiếng Anh.` },
-                  { title: "Liên quan", icon: <Sparkles size={16}/>, prompt: `Tìm và liệt kê các tài liệu khác trong kho tri thức có nội dung liên quan đến chủ đề "${data.document.topic}" hoặc bổ sung cho tài liệu "${data.document.title}".` },
-                ].map(x => (
-                  <button key={x.title} disabled={aiLoading} onClick={() => askAI(x.title, x.prompt)} className="btn-secondary flex-col py-3 disabled:opacity-50">
-                    {x.icon}<span className="text-[10px]">{x.title}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </Panel>
-
-          {/* Chat section */}
-          <Panel title="Hỏi về tài liệu này">
-            <div className="flex flex-col" style={{ height: "360px" }}>
-              <div className="flex-1 overflow-y-auto p-3 space-y-3">
-                {chat.length === 0 && (
-                  <p className="muted text-[11px] text-center pt-4">Hỏi bất kỳ câu hỏi nào về tài liệu này...</p>
-                )}
-                {chat.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className={`max-w-[85%] rounded-xl px-3 py-2 text-xs leading-relaxed ${msg.role === "user" ? "bg-blue-600 text-white rounded-tr-sm" : "bg-[var(--soft)] text-[var(--text)] rounded-tl-sm"}`}>
-                      {msg.role === "ai"
-                        ? <div className="prose prose-xs max-w-none"><ReactMarkdown>{msg.text}</ReactMarkdown></div>
-                        : msg.text
-                      }
-                    </div>
-                  </div>
-                ))}
-                {chatLoading && (
-                  <div className="flex justify-start">
-                    <div className="bg-[var(--soft)] rounded-xl rounded-tl-sm px-3 py-2 flex items-center gap-2 text-xs text-[var(--muted)]">
-                      <LoaderCircle size={12} className="animate-spin"/>Đang trả lời...
-                    </div>
-                  </div>
-                )}
-                <div ref={chatBottomRef}/>
-              </div>
-              <form onSubmit={sendChat} className="border-t border-[var(--border)] p-2 flex gap-2">
+              {/* Chat input — always visible */}
+              <form onSubmit={sendChat} className={`flex gap-2 ${chat.length > 0 ? "mt-6 border-t border-[var(--border)] pt-5" : "mt-4"}`}>
                 <input
-                  className="field text-xs"
+                  className="field"
                   value={chatInput}
                   onChange={e => setChatInput(e.target.value)}
-                  placeholder="Nhập câu hỏi của bạn..."
+                  placeholder={chat.length > 0 ? "Hỏi thêm về tài liệu này..." : "Nhập câu hỏi về tài liệu này hoặc chọn chức năng bên phải..."}
                   disabled={chatLoading}
                 />
-                <button type="submit" disabled={chatLoading || !chatInput.trim()} className="btn-primary px-3 disabled:opacity-50">
-                  <Send size={14}/>
+                <button type="submit" disabled={chatLoading || !chatInput.trim()} className="btn-primary px-4 disabled:opacity-50">
+                  <Send size={15}/>
                 </button>
               </form>
             </div>
-          </Panel>
+          </div>
         </div>
+
+        {/* Right: AI action buttons only */}
+        <Panel title="Trợ lý AI">
+          <div className="p-3">
+            <div className="rounded-xl bg-gradient-to-br from-blue-700 to-indigo-800 p-4 text-white">
+              <Sparkles size={18}/>
+              <strong className="mt-3 block text-sm">Thông tin nguồn gốc</strong>
+              <p className="mt-1 text-[11px] text-blue-100">{data.sync_history.length} lần đồng bộ được ghi nhận.</p>
+            </div>
+            <p className="muted mt-4 mb-2 text-[10px] uppercase font-bold">Chọn chức năng</p>
+            <div className="grid grid-cols-2 gap-2">
+              {presets.map(x => (
+                <button
+                  key={x.title}
+                  disabled={chatLoading}
+                  onClick={() => askAI(x.title, x.prompt)}
+                  className={`btn-secondary flex-col py-3 disabled:opacity-50 ${aiAction === x.title ? "ring-2 ring-blue-500" : ""}`}
+                >
+                  {x.icon}
+                  <span className="text-[10px]">{x.title}</span>
+                </button>
+              ))}
+            </div>
+            <p className="muted mt-4 text-[10px] text-center">Cuộc trò chuyện sẽ được lưu vào lịch sử Trợ lý AI</p>
+          </div>
+        </Panel>
       </div>
     </div>
   );
