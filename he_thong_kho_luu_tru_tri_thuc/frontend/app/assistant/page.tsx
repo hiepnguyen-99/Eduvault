@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, ReactNode, useEffect, useRef, useState } from "react";
-import { Bot, Download, ExternalLink, FileText, LoaderCircle, MessageSquare, Plus, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, ChevronDown, Download, ExternalLink, FileText, LoaderCircle, MessageSquare, Plus, Send, Sparkles, Trash2, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { API_URL } from "@/lib/api";
 import { PageHeader, Panel } from "@/components/ui";
@@ -90,23 +90,33 @@ function DocModal({ doc, token, onClose }: { doc: DocPreview; token: string; onC
 }
 
 function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: (id: string, title: string) => void }) {
+  const [open, setOpen] = useState(false);
   if (!citations.length) return null;
   return (
-    <div className="mt-5 border-t border-[var(--border)] pt-4">
-      <p className="mb-3 flex items-center gap-2 text-xs font-bold"><FileText className="text-blue-600" size={15}/>Nguồn tham khảo</p>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {citations.map(item => (
-          <div key={item.id} className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
-            <strong className="block text-xs">{item.title}</strong>
-            <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
-            <div className="mt-2 flex gap-2">
-              {onPreview && <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>}
-              {onPreview && <span className="text-[var(--border)]">·</span>}
-              <Link href={`/documents/${item.id}`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"><ExternalLink size={11}/>Chi tiết</Link>
+    <div className="mt-4 border-t border-[var(--border)] pt-3">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-[11px] text-[var(--muted)] hover:text-blue-600 transition-colors"
+      >
+        <FileText size={12}/>
+        Nguồn tham khảo ({citations.length})
+        <ChevronDown size={12} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}/>
+      </button>
+      {open && (
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {citations.map(item => (
+            <div key={item.id} className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
+              <strong className="block text-xs">{item.title}</strong>
+              <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
+              <div className="mt-2 flex gap-2">
+                {onPreview && <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>}
+                {onPreview && <span className="text-[var(--border)]">·</span>}
+                <Link href={`/documents/${item.id}`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"><ExternalLink size={11}/>Chi tiết</Link>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

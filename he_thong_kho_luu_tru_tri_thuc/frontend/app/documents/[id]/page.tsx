@@ -1,6 +1,6 @@
 "use client";
 import {
-  BookOpen, ChevronLeft, Download, FileText, Highlighter,
+  BookOpen, ChevronDown, ChevronLeft, Download, FileText, Highlighter,
   Languages, LoaderCircle, MessageSquareText, Send, Sparkles,
 } from "lucide-react";
 import Link from "next/link";
@@ -30,6 +30,31 @@ const empty: Provenance = {
   versions: [], sync_history: [], files: [],
   access: { type: "public", request_id: null },
 };
+
+function CitationToggle({ citations }: { citations: Citation[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-4 border-t border-[var(--border)] pt-3">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-[11px] text-[var(--muted)] hover:text-blue-600 transition-colors"
+      >
+        <FileText size={12}/>
+        Nguồn tham khảo ({citations.length})
+        <ChevronDown size={12} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}/>
+      </button>
+      {open && (
+        <div className="mt-3 space-y-1">
+          {citations.map(c => (
+            <Link key={c.id} href={`/documents/${c.id}`} className="flex items-center gap-1.5 text-xs text-blue-600 hover:underline">
+              <FileText size={11}/>{c.title}
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function saveConvToStorage(convId: string, title: string, items: ChatItem[]) {
   try {
@@ -226,16 +251,9 @@ export default function DocumentViewer() {
                       <div className="ai-result">
                         <ReactMarkdown>{item.answer}</ReactMarkdown>
                       </div>
-                      {/* Citations — show only for first message */}
-                      {item.citations.length > 0 && i === 0 && (
-                        <div className="mt-4 border-t border-[var(--border)] pt-3">
-                          <p className="muted mb-2 text-[10px] uppercase font-bold">Nguồn tham khảo</p>
-                          {item.citations.map(c => (
-                            <Link key={c.id} href={`/documents/${c.id}`} className="mt-1 flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                              <FileText size={12}/>{c.title}
-                            </Link>
-                          ))}
-                        </div>
+                      {/* Citations — collapsible, shown for all messages */}
+                      {item.citations.length > 0 && (
+                        <CitationToggle citations={item.citations}/>
                       )}
                     </div>
                   ))}
