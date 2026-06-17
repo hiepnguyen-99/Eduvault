@@ -146,6 +146,7 @@ class UploadConfirmInput(BaseModel):
     folder_node_id: str | None = None
     document_type: str = Field(min_length=2, max_length=80)
     visibility: Literal["public", "private"]
+    final_destination_source: Literal["manual", "ai"] | None = None
 
 
 class SpecializationSelection(BaseModel):
@@ -940,13 +941,11 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         final_course_id = payload.course_id
         final_document_type = payload.document_type
         selected_node = validate_folder_access(db, user, payload.folder_node_id) if payload.folder_node_id else None
-        if selected_node and selected_node["type"] in {"specialization", "faculty"}:
-            raise HTTPException(400, "Tai lieu phai duoc luu trong hoc phan hoac thu muc loai tai lieu.")
+        if selected_node and selected_node["type"] in {"faculty", "specialization", "course"}:
+            raise HTTPException(400, "Document must be saved inside a document-type folder.")
         if selected_node and selected_node["type"] == "standard_folder":
             final_document_type = selected_node["name"]
             final_course_id = selected_node["parent_id"]
-        elif selected_node and selected_node["type"] == "course":
-            final_course_id = selected_node["id"]
         selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
         if selected_course:
             spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
@@ -955,6 +954,18 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
         if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
             raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
+        destination_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND status='active'", (assignment["folder_node_id"],)).fetchone() if assignment["folder_node_id"] else None
+        if destination_node and destination_node["type"] in {"faculty", "specialization", "course"}:
+            raise HTTPException(400, "Document must be saved inside a document-type folder.")
+        print(json.dumps({
+            "document_title": metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem,
+            "course_id": final_course_id,
+            "document_type": final_document_type,
+            "resolved_destination_folder_id": assignment["folder_node_id"],
+            "resolved_destination_folder_name": destination_node["name"] if destination_node else None,
+            "resolved_destination_folder_type": destination_node["type"] if destination_node else None,
+            "final_destination_source": payload.final_destination_source,
+        }, ensure_ascii=True))
         title = metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem
         topic = selected_course["name"] if selected_course else metadata.get("topic") or final_document_type
         raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
@@ -1026,13 +1037,16 @@ def delete_upload_task(task_id: str, user: dict = Depends(current_user)):
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
             raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
-        if task["status"] in {"uploading", "uploaded", "analyzing", "saving_metadata"} and task["uploaded_bytes"] > 0:
+        if task["status"] in {"processing", "saving_metadata"}:
             raise HTTPException(409, "Không thể xóa tác vụ đang xử lý.")
         temp_path = __import__("pathlib").Path(task["temp_path"])
+        db.execute("DELETE FROM document_classification_tickets WHERE upload_task_id=?", (task_id,))
         db.execute("DELETE FROM upload_tasks WHERE id=?", (task_id,))
+        action = "upload.removed" if task["document_id"] else "upload.cancelled"
+        audit(db, user["code"], action, "upload_task", task_id, {"filename": task["filename"], "status": task["status"]})
     if temp_path.exists():
         temp_path.unlink()
-    return {"status": "deleted", "id": task_id}
+    return {"status": "deleted" if task["document_id"] else "cancelled", "id": task_id}
 
 
 @app.post("/api/documents/upload", status_code=201)
