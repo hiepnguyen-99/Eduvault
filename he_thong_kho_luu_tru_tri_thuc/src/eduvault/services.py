@@ -774,6 +774,22 @@ def content_for(db, document: dict) -> str:
     return Path(row["storage_path"]).read_text(encoding="utf-8") if row else ""
 
 
+def meaningful_text_score(text: str) -> int:
+    words = re.findall(r"\w+", text, re.UNICODE)
+    return sum(1 for word in words if len(word) >= 3)
+
+
+def extraction_placeholder(filename: str, extracted: str = "") -> str:
+    return (
+        f"File: {filename}\n"
+        "Status: TEXT_EXTRACTION_INSUFFICIENT\n"
+        "He thong da luu file goc nhung chua trich xuat du noi dung de hoi dap chi tiet. "
+        "Tai lieu co the la PDF scan/anh hoac OCR chua doc duoc chu.\n"
+        "Goi y: tai len ban PDF co text layer, file DOCX/TXT, hoac chay OCR lai truoc khi hoi chatbot.\n\n"
+        f"Noi dung trich xuat duoc:\n{extracted.strip()}"
+    ).strip()
+
+
 def guess_metadata(filename: str, content: str, instructions: str | None = None) -> dict:
     text = f"{filename} {content}".lower()
     topic = "Khác"
@@ -1075,6 +1091,8 @@ def run_document_processing_jobs(db, document_id: str) -> dict:
         set_v2_state(db, document_id, indexing_status="processing")
         raw = Path(asset["original_path"]).read_bytes() if asset else content_for(db, dict(document)).encode("utf-8")
         full_text = extract_text(asset["original_name"] if asset else document["title"], asset["mime_type"] if asset else "text/plain", raw)
+        if asset and meaningful_text_score(full_text) < 12:
+            full_text = extraction_placeholder(asset["original_name"], full_text)
         version = db.execute(
             "SELECT * FROM versions WHERE document_id=? AND version_no=?",
             (document_id, document["current_version"]),
@@ -1189,23 +1207,26 @@ def extract_text(filename: str, mime_type: str, raw: bytes) -> str:
         except (zipfile.BadZipFile, KeyError, ElementTree.ParseError):
             pass
     if suffix == ".pdf":
+        extracted = ""
         try:
             from pypdf import PdfReader
             reader = PdfReader(BytesIO(raw))
             extracted = "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
-            if extracted:
+            if meaningful_text_score(extracted) >= 12:
                 return extracted
         except Exception:
             pass
         try:
             import fitz
             pdf = fitz.open(stream=raw, filetype="pdf")
-            images = [page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False).tobytes("png") for page in pdf[:10]]
+            images = [page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False).tobytes("png") for page in pdf[:10]]
             ocr_text = ai_provider.ocr_images(images).strip()
-            if ocr_text:
+            if meaningful_text_score(ocr_text) >= 12:
                 return ocr_text
         except Exception:
             pass
+        if extracted:
+            return extracted
         return f"[PDF scan chưa OCR được: {filename}]"
     return f"[File gốc: {filename}] Nội dung chưa được trích xuất. Cần cấu hình parser/OCR cho định dạng {suffix or mime_type}."
 
@@ -1304,10 +1325,29 @@ def _no_matching_documents_answer(intent: dict) -> str:
     )
 
 
+def lexical_score(question_words: set[str], document: dict, content: str) -> float:
+    title = f"{document['title']} {document['topic']} {document['doc_type']}".casefold()
+    body = content.casefold()
+    title_hits = sum(1 for word in question_words if word in title)
+    body_hits = sum(1 for word in question_words if word in body)
+    exact_title_bonus = 4.0 if title and title in " ".join(question_words) else 0.0
+    return exact_title_bonus + title_hits * 3.0 + min(body_hits, 8) * 0.8
+
+
+def merge_ranked_matches(candidates: list[tuple[float, dict, str]]) -> list[tuple[float, dict, str]]:
+    best: dict[str, tuple[float, dict, str]] = {}
+    for score, document, content in candidates:
+        current = best.get(document["id"])
+        if current is None or score > current[0]:
+            best[document["id"]] = (score, document, content)
+    return sorted(best.values(), key=lambda item: item[0], reverse=True)
+
+
 def ask(db, user: dict, question: str) -> dict:
     allowed = {document["id"]: document for document in rag_documents(db, user)}
     intent = _query_intent(question)
     query_vectors: dict[str, list[float]] = {}
+    words = {word for word in re.findall(r"\w+", question.casefold(), re.UNICODE) if len(word) > 2}
     vector_matches = []
     for chunk in db.execute("SELECT * FROM chunks").fetchall():
         document = allowed.get(chunk["document_id"])
@@ -1319,25 +1359,22 @@ def ask(db, user: dict, question: str) -> dict:
         query_vector = query_vectors[provider]
         vector = json.loads(chunk["vector"])
         similarity = sum(a * b for a, b in zip(query_vector, vector))
-        vector_matches.append((similarity, document, chunk["content"]))
-    vector_matches.sort(key=lambda item: item[0], reverse=True)
-    if vector_matches and vector_matches[0][0] > 0:
-        matches = vector_matches[:8]
-    else:
-        matches = []
-    words = {word for word in re.findall(r"\w+", question.lower(), re.UNICODE) if len(word) > 2}
+        lexical = lexical_score(words, document, chunk["content"])
+        vector_matches.append((similarity + lexical, document, chunk["content"]))
+    vector_matches = merge_ranked_matches([item for item in vector_matches if item[0] > 0])
     scored = []
     for document in allowed.values():
         content = content_for(db, document)
-        searchable = f"{document['title']} {document['topic']} {document['doc_type']} {content}".lower()
-        score = sum(word in searchable for word in words)
+        score = lexical_score(words, document, content)
         if score:
             scored.append((score, document, content))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    candidates = matches or scored
+    scored = merge_ranked_matches(scored)
+    candidates = merge_ranked_matches(vector_matches + scored)
     filtered = [(score, document, content) for score, document, content in candidates if _matches_query_intent(document, content, intent)]
     if filtered:
-        matches = filtered[:3]
+        top_score = filtered[0][0]
+        threshold = max(1.0, top_score * 0.35)
+        matches = [item for item in filtered if item[0] >= threshold][:3]
     elif intent["wants_books"] or intent["wants_exam"] or intent["wants_ai"]:
         matches = []
     else:
@@ -1377,21 +1414,42 @@ def conversational_fallback(question: str, matches: list[tuple]) -> str:
 
 
 def ensure_conversational_format(answer: str, question: str) -> str:
-    # Strip any source citation block the AI might have appended
     cleaned = re.split(
         r"\n#{0,3}\s*(?:📄\s*)?(?:Nguồn tham khảo|Nguồn tài liệu|Tài liệu tham khảo)\s*:?",
         answer.strip(),
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip()
-    # Strip legacy template sections if AI still generates them
+    required = (
+        "### Nội dung trọng tâm",
+        "### Những phần cần chú ý",
+        "### Gợi ý học tập",
+        "### Bạn có thể hỏi tiếp",
+    )
+    if all(section in cleaned for section in required):
+        return cleaned
     for pattern in (
         r"\n###\s*Bạn có thể hỏi tiếp[\s\S]*",
         r"\n###\s*Gợi ý học tập[\s\S]*",
         r"\n###\s*Những phần cần chú ý[\s\S]*(?=\n###|$)",
+        r"\n###\s*Nội dung trọng tâm\s*",
     ):
-        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
-    return cleaned
+        cleaned = re.sub(pattern, "\n", cleaned, flags=re.IGNORECASE).strip()
+    return (
+        "📚 Mình đã đọc tài liệu và chọn ra những ý hữu ích nhất cho bạn.\n\n"
+        "### Nội dung trọng tâm\n\n"
+        f"{cleaned}\n\n"
+        "### Những phần cần chú ý\n\n"
+        "⚠️ Hãy đối chiếu các ý trên với **ngữ cảnh và phạm vi áp dụng** trong tài liệu.\n\n"
+        "### Gợi ý học tập\n\n"
+        f"✅ Thử diễn giải lại câu trả lời cho câu hỏi **{question.strip()}** bằng lời của bạn.\n\n"
+        "✅ Chọn một phần chưa rõ và hỏi sâu hơn thay vì đọc lại toàn bộ.\n\n"
+        "### Bạn có thể hỏi tiếp\n\n"
+        "- Giải thích kỹ hơn một phần\n"
+        "- Tạo câu hỏi ôn tập từ nội dung này\n"
+        "- So sánh các tài liệu liên quan\n"
+        "- Đề xuất nội dung nên học tiếp"
+    )
 
 
 def index_document(db, document_id: str, version_no: int, content: str, force_local: bool = False) -> None:

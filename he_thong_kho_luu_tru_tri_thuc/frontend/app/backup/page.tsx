@@ -86,7 +86,7 @@ export default function Backup() {
   }
 
   return <div>
-    <PageHeader eyebrow="Sao lưu và phục hồi" title="Trung tâm sao lưu" description="Theo dõi bản sao hệ thống và đồng bộ tài liệu lên cloud cá nhân." actions={user?.role === "admin" ? <button className="btn-primary" onClick={create}><DatabaseBackup size={15}/>Sao lưu ngay</button> : undefined}/>
+    <PageHeader eyebrow="Đồng bộ" title={canViewCompliance ? "Trung tâm sao lưu" : "Đồng bộ cloud cá nhân"} description="Kết nối Google Drive hoặc OneDrive để đồng bộ tài liệu bạn sở hữu." actions={user?.role === "admin" ? <button className="btn-primary" onClick={create}><DatabaseBackup size={15}/>Sao lưu ngay</button> : undefined}/>
 
     {canViewCompliance ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <Metric label="Bản sao khả dụng" value={String(c.copies)} detail={`Yêu cầu ${c.required.copies}`} icon={<DatabaseBackup size={18}/>}/>
@@ -118,6 +118,6 @@ export default function Backup() {
 
     {canViewCompliance && <Panel title="Kho lưu trữ hệ thống đang hoạt động" className="mt-5"><div className="grid gap-3 p-5 sm:grid-cols-3">{c.storages.map(x => <div key={x.id} className="rounded-xl border border-[var(--border)] p-4"><Cloud size={20}/><strong className="mt-3 block text-sm">{x.name}</strong><span className="muted text-xs">{x.provider}</span><span className="badge badge-green mt-3"><CheckCircle2 size={11}/>{x.last_status}</span></div>)}</div></Panel>}
 
-    <Panel title="Lịch sử sao lưu hệ thống" className="mt-5"><div className="table-shell"><table className="data-table"><thead><tr><th>Mã backup</th><th>Trạng thái</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead><tbody>{dash.backups.map(x => <tr key={x.id}><td><strong>{x.id}</strong></td><td><span className="badge badge-green">{x.status}</span></td><td>{x.created_by}</td><td>{formatDate(x.created_at)}</td><td>{user?.role === "admin" && <button className="btn-secondary" onClick={() => restore(x)}><RotateCcw size={13}/>Khôi phục</button>}</td></tr>)}</tbody></table></div></Panel>
+    {canViewCompliance && <Panel title="Lịch sử sao lưu hệ thống" className="mt-5"><div className="table-shell"><table className="data-table"><thead><tr><th>Mã backup</th><th>Trạng thái</th><th>Người tạo</th><th>Thời gian</th><th></th></tr></thead><tbody>{dash.backups.map(x => <tr key={x.id}><td><strong>{x.id}</strong></td><td><span className="badge badge-green">{x.status}</span></td><td>{x.created_by}</td><td>{formatDate(x.created_at)}</td><td>{user?.role === "admin" && <button className="btn-secondary" onClick={() => restore(x)}><RotateCcw size={13}/>Khôi phục</button>}</td></tr>)}</tbody></table></div></Panel>}
   </div>;
 }

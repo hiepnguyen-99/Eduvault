@@ -25,7 +25,7 @@ from .services import (
     DOCUMENT_TYPES, active_course_suggestions, active_policy, create_document, create_policy_file, enqueue_processing_jobs, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
     list_deleted_documents, list_documents, list_policy_files, master_tree, permanently_delete_document,
     build_lecturer_folder_tree, profile_specializations, public_specializations, quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
-    quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
+    extraction_placeholder, meaningful_text_score, quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
     activate_policy_file, set_user_specializations, validate_folder_access,
 )
 
@@ -186,16 +186,16 @@ def require_roles(*roles):
 ROLE_PERMISSIONS = {
     "admin": [
         "dashboard.view", "repository.view", "repository.upload", "policy.manage", "users.manage",
-        "permissions.manage", "backup.manage", "reports.view", "audit.view", "profile.manage",
+        "permissions.manage", "backup.manage", "cloud.sync", "reports.view", "audit.view", "profile.manage",
     ],
     "head": [
-        "dashboard.view", "repository.view", "transfer.manage", "quality.view", "reports.view", "profile.manage",
+        "dashboard.view", "repository.view", "cloud.sync", "transfer.manage", "quality.view", "reports.view", "profile.manage",
     ],
     "lecturer": [
-        "dashboard.view", "repository.own", "repository.upload", "versions.view", "chatbot.use", "profile.manage",
+        "dashboard.view", "repository.own", "repository.upload", "cloud.sync", "versions.view", "chatbot.use", "profile.manage",
     ],
     "new_lecturer": [
-        "dashboard.view", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage",
+        "dashboard.view", "cloud.sync", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage",
     ],
 }
 
@@ -771,6 +771,8 @@ def process_upload_task(task_id: str) -> None:
             )
         raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
         content = extract_text(task["filename"], task["mime_type"], raw)
+        if meaningful_text_score(content) < 12:
+            content = extraction_placeholder(task["filename"], content)
         with connection() as db:
             prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
             prompts = json.loads(prompt_row["value"]) if prompt_row else {}

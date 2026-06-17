@@ -11,6 +11,7 @@ export type Permission =
   | "users.manage"
   | "permissions.manage"
   | "backup.manage"
+  | "cloud.sync"
   | "reports.view"
   | "audit.view"
   | "transfer.manage"
@@ -50,12 +51,14 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
     "users.manage",
     "permissions.manage",
     "backup.manage",
+    "cloud.sync",
     "reports.view",
     "audit.view",
   ],
   HEAD_OF_DEPARTMENT: [
     "dashboard.view",
     "repository.view",
+    "cloud.sync",
     "transfer.manage",
     "quality.view",
     "reports.view",
@@ -64,12 +67,14 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
     "dashboard.view",
     "repository.own",
     "repository.upload",
+    "cloud.sync",
     "versions.view",
     "chatbot.use",
     "profile.manage",
   ],
   NEW_LECTURER: [
     "dashboard.view",
+    "cloud.sync",
     "handover.view",
     "knowledge.summary",
     "chatbot.use",
@@ -91,6 +96,7 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   HEAD_OF_DEPARTMENT: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
     { label: "Kho tài liệu", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
     { label: "Chuyển giao", href: "/knowledge-transfer", permission: "transfer.manage", icon: "transfer" },
     { label: "Theo dõi chất lượng", href: "/reports", permission: "quality.view", icon: "quality" },
     { label: "Báo cáo", href: "/reports", permission: "reports.view", icon: "reports" },
@@ -98,6 +104,7 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   LECTURER: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
     { label: "Kho của tôi", href: "/repository", permission: "repository.own", icon: "repository" },
+    { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
     { label: "Lịch sử phiên bản", href: "/versions", permission: "versions.view", icon: "versions" },
     { label: "Chatbot", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
     { label: "Hồ sơ", href: "/profile", permission: "profile.manage", icon: "profile" },
@@ -105,6 +112,7 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   NEW_LECTURER: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
     { label: "Kho bàn giao", href: "/knowledge-transfer", permission: "handover.view", icon: "handover" },
+    { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
     { label: "Tóm tắt tri thức", href: "/knowledge-transfer", permission: "knowledge.summary", icon: "summary" },
     { label: "Chatbot", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
     { label: "Hồ sơ", href: "/profile", permission: "profile.manage", icon: "profile" },
@@ -123,6 +131,7 @@ export const ROUTE_PERMISSIONS: Array<{ pattern: RegExp; permission: Permission 
   { pattern: /^\/knowledge-transfer(?:\/.*)?$/, permission: "knowledge.summary" },
   { pattern: /^\/versions(?:\/.*)?$/, permission: "versions.view" },
   { pattern: /^\/backup(?:\/.*)?$/, permission: "backup.manage" },
+  { pattern: /^\/backup(?:\/.*)?$/, permission: "cloud.sync" },
   { pattern: /^\/permissions(?:\/.*)?$/, permission: "permissions.manage" },
   { pattern: /^\/reports(?:\/.*)?$/, permission: "reports.view" },
   { pattern: /^\/reports(?:\/.*)?$/, permission: "quality.view" },
