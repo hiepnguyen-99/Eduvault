@@ -57,17 +57,17 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const menuItems = ROLE_MENUS[appRole].filter(item => user.permissions.includes(item.permission));
 
   const sidebar = (
-    <aside className="h-full w-[280px] bg-[var(--sidebar)] text-white flex flex-col">
-      <div className="h-[72px] px-5 flex items-center gap-3 border-b border-white/10">
-        <div className="h-9 w-9 rounded-lg bg-blue-500 grid place-items-center"><BookOpenCheck size={20}/></div>
-        <div><strong className="block max-w-[130px] text-[12px] font-bold uppercase leading-4 tracking-wide">Kho lưu trữ tri thức</strong></div>
+    <aside className="h-full w-[304px] max-w-[calc(100vw-32px)] bg-[var(--sidebar)] text-white flex flex-col">
+      <div className="h-[84px] px-6 flex items-center gap-3 border-b border-white/10">
+        <div className="h-11 w-11 shrink-0 rounded-xl bg-blue-500 grid place-items-center"><BookOpenCheck size={22}/></div>
+        <div className="min-w-0 whitespace-nowrap"><strong className="block text-[17px] font-extrabold leading-5 tracking-normal">EduVault</strong><span className="mt-1 block text-[12px] font-semibold leading-4 text-blue-100/75">Kho tri thức khoa CNTT</span></div>
       </div>
-      <nav className="p-3 space-y-1 flex-1" aria-label="Điều hướng chính">
-        <p className="px-3 py-2 text-[10px] font-bold uppercase tracking-[.16em] text-blue-200/60">Không gian làm việc</p>
+      <nav className="flex flex-1 flex-col gap-1 px-4 py-5" aria-label="Điều hướng chính">
+        <p className="px-3 pb-2 text-[10px] font-bold uppercase tracking-[.16em] text-blue-200/60">Không gian làm việc</p>
         {menuItems.map((item) => {
           const Icon = icons[item.icon];
           const active = path === item.href.split("?")[0];
-          return <Link key={`${item.permission}:${item.href}`} href={item.href} onClick={()=>setMobile(false)} className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-semibold transition ${active ? "bg-blue-500 text-white shadow-lg shadow-blue-950/20" : "text-blue-100/75 hover:bg-white/8 hover:text-white"}`}><Icon size={17}/>{item.label}</Link>
+          return <Link key={`${item.permission}:${item.href}`} href={item.href} onClick={()=>setMobile(false)} className={`flex h-12 w-full items-center gap-3 rounded-xl px-3 text-[13px] font-semibold transition-colors duration-150 ${active ? "bg-blue-500 text-white shadow-lg shadow-blue-950/20" : "bg-transparent text-blue-100/75 hover:bg-white/10 hover:text-white"}`}><Icon className="shrink-0" size={18}/><span className="truncate whitespace-nowrap">{item.label}</span></Link>
         })}
       </nav>
       <div className="m-3 rounded-xl border border-white/10 bg-white/5 p-3">
@@ -82,9 +82,9 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen">
       <div className="desktop-sidebar fixed inset-y-0 left-0 z-30">{sidebar}</div>
       {mobile && <div className="fixed inset-0 z-50 flex lg:hidden"><div className="absolute inset-0 bg-slate-950/60" onClick={()=>setMobile(false)}/><div className="relative">{sidebar}<button aria-label="Đóng menu" className="absolute right-3 top-4 text-white" onClick={()=>setMobile(false)}><X/></button></div></div>}
-      <div className="main-offset ml-[280px]">
+      <div className="main-offset ml-[304px]">
         <header className="sticky top-0 z-20 h-[72px] bg-[color:var(--card)]/92 backdrop-blur border-b border-[var(--border)] px-4 md:px-7 flex items-center gap-3">
-          <button className="icon-btn lg:hidden" aria-label="Mở menu" onClick={()=>setMobile(true)}><Menu size={18}/></button>
+          <button className="icon-btn sidebar-toggle" aria-label="Mở menu" onClick={()=>setMobile(true)}><Menu size={18}/></button>
           <button onClick={()=>setSearchOpen(true)} className="h-10 max-w-xl flex-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 flex items-center gap-2 text-left text-sm text-[var(--muted)]"><Search size={17}/><span className="truncate">Tìm tài liệu, học phần, giảng viên...</span><kbd className="ml-auto hidden sm:block rounded border border-[var(--border)] bg-[var(--card)] px-1.5 py-0.5 text-[10px]">⌘ K</kbd></button>
           <button className="icon-btn" aria-label="Đổi giao diện" onClick={()=>setDark(!dark)}>{dark?<Sun size={17}/>:<Moon size={17}/>}</button>
           <button className="icon-btn relative" aria-label="Thông báo"><Bell size={17}/><i className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-red-500"/></button>
