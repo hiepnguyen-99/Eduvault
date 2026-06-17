@@ -1370,60 +1370,26 @@ def conversational_fallback(question: str, matches: list[tuple]) -> str:
         detail = sentences[0][:240] if sentences else f"Tài liệu tập trung vào {document['topic']}."
         highlights.append((document["title"], detail))
 
-    topic_lines = "\n\n".join(
-        f"- **{title}**: {detail}" for title, detail in highlights
-    )
-    attention = "\n\n".join(
-        f"⚠️ Chú ý phần **{document['topic']}** trong tài liệu *{document['title']}*."
-        for _, document, _ in matches[:2]
-    )
-    return (
-        "📚 Mình đã đọc các tài liệu liên quan và đây là phần hữu ích nhất cho câu hỏi của bạn.\n\n"
-        "### Nội dung trọng tâm\n\n"
-        f"{topic_lines}\n\n"
-        "### Những phần cần chú ý\n\n"
-        f"{attention}\n\n"
-        "### Gợi ý học tập\n\n"
-        "✅ Đọc lần lượt từng ý trọng tâm, sau đó tự diễn giải lại bằng lời của bạn.\n\n"
-        f"✅ Đối chiếu các ý trên với câu hỏi **{question.strip()}** để xác định phần cần đào sâu.\n\n"
-        "### Bạn có thể hỏi tiếp\n\n"
-        "- Giải thích kỹ hơn từng ý\n"
-        "- Tạo câu hỏi ôn tập từ nội dung này\n"
-        "- So sánh các tài liệu liên quan\n"
-        "- Đề xuất lộ trình học"
-    )
+    lines = "\n".join(f"- **{title}**: {detail}" for title, detail in highlights)
+    return f"Dưới đây là thông tin tìm được từ các tài liệu liên quan:\n\n{lines}"
 
 
 def ensure_conversational_format(answer: str, question: str) -> str:
+    # Strip any source citation block the AI might have appended
     cleaned = re.split(
         r"\n#{0,3}\s*(?:📄\s*)?(?:Nguồn tham khảo|Nguồn tài liệu|Tài liệu tham khảo)\s*:?",
         answer.strip(),
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip()
-    required = (
-        "### Nội dung trọng tâm",
-        "### Những phần cần chú ý",
-        "### Gợi ý học tập",
-        "### Bạn có thể hỏi tiếp",
-    )
-    if all(section in cleaned for section in required):
-        return cleaned
-    return (
-        "📚 Mình đã đọc tài liệu và chọn ra những ý hữu ích nhất cho bạn.\n\n"
-        "### Nội dung trọng tâm\n\n"
-        f"{cleaned}\n\n"
-        "### Những phần cần chú ý\n\n"
-        "⚠️ Hãy đối chiếu các ý trên với **ngữ cảnh và phạm vi áp dụng** trong tài liệu.\n\n"
-        "### Gợi ý học tập\n\n"
-        f"✅ Thử diễn giải lại câu trả lời cho câu hỏi **{question.strip()}** bằng lời của bạn.\n\n"
-        "✅ Chọn một phần chưa rõ và hỏi sâu hơn thay vì đọc lại toàn bộ.\n\n"
-        "### Bạn có thể hỏi tiếp\n\n"
-        "- Giải thích kỹ hơn một phần\n"
-        "- Tạo câu hỏi ôn tập từ nội dung này\n"
-        "- So sánh các tài liệu liên quan\n"
-        "- Đề xuất nội dung nên học tiếp"
-    )
+    # Strip legacy template sections if AI still generates them
+    for pattern in (
+        r"\n###\s*Bạn có thể hỏi tiếp[\s\S]*",
+        r"\n###\s*Gợi ý học tập[\s\S]*",
+        r"\n###\s*Những phần cần chú ý[\s\S]*(?=\n###|$)",
+    ):
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
 
 
 def index_document(db, document_id: str, version_no: int, content: str, force_local: bool = False) -> None:
