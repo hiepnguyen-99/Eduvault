@@ -12,7 +12,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .ai import ai_provider
-from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, now, restore_database, rows, snapshot_database
+from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, now, restore_database, rows, snapshot_database, map_document_type_to_standard_folder
 from .infrastructure import delete_object, delete_vectors, publish_event, store_object, upsert_vector
 
 
@@ -890,6 +890,147 @@ def suggest_upload_destination(db, user: dict, filename: str, preview: str) -> d
     }
 
 
+def active_course_suggestions(db, filename: str, preview: str) -> list[dict]:
+    text = f"{filename} {preview}".casefold()
+    policy = active_policy(db)
+    suggestions: list[dict] = []
+    if not policy:
+        return suggestions
+    specs = rows(db.execute(
+        "SELECT s.id specialization_id,s.name specialization_name,s.folder_node_id specialization_node_id "
+        "FROM specializations s WHERE s.policy_id=?",
+        (policy["id"],),
+    ).fetchall())
+    for spec in specs:
+        courses = rows(db.execute(
+            "SELECT * FROM folder_nodes WHERE parent_id=? AND type='course' AND status='active'",
+            (spec["specialization_node_id"],),
+        ).fetchall())
+        spec_score = 2 if spec["specialization_name"].casefold() in text else 0
+        for course in courses:
+            course_score = 3 if course["name"].casefold() in text else 0
+            token_hits = sum(1 for token in re.findall(r"\w+", course["name"].casefold(), re.UNICODE) if len(token) > 2 and token in text)
+            score = spec_score + course_score + min(token_hits, 2)
+            suggestions.append({
+                "specialization_id": spec["specialization_id"],
+                "specialization": spec["specialization_name"],
+                "course_id": course["id"],
+                "course": course["name"],
+                "score": score,
+            })
+    suggestions.sort(key=lambda item: item["score"], reverse=True)
+    top = suggestions[:3]
+    total = sum(max(item["score"], 0) for item in top)
+    if total <= 0 and top:
+        for item in top:
+            item["confidence"] = round(1 / len(top), 2)
+    else:
+        for item in top:
+            item["confidence"] = round(max(item["score"], 0) / total, 2) if total else 0
+    return top
+
+
+def standard_folder_for_selection(db, course_id: str | None, document_type: str) -> dict | None:
+    if not course_id:
+        return None
+    course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (course_id,)).fetchone()
+    if not course:
+        return None
+    mapped_folder_name = map_document_type_to_standard_folder(document_type)
+    
+    # 1. Try exact match with mapped folder name (case-insensitive)
+    exact = db.execute(
+        "SELECT * FROM folder_nodes WHERE parent_id=? AND type='standard_folder' AND status='active' AND lower(name)=lower(?)",
+        (course_id, mapped_folder_name),
+    ).fetchone()
+    if exact:
+        return dict(exact)
+        
+    # 2. Try match with original document type name (case-insensitive)
+    exact_orig = db.execute(
+        "SELECT * FROM folder_nodes WHERE parent_id=? AND type='standard_folder' AND status='active' AND lower(name)=lower(?)",
+        (course_id, document_type),
+    ).fetchone()
+    if exact_orig:
+        return dict(exact_orig)
+        
+    # 3. Match using the mapping function on sibling standard folder names
+    siblings = db.execute(
+        "SELECT * FROM folder_nodes WHERE parent_id=? AND type='standard_folder' AND status='active'",
+        (course_id,),
+    ).fetchall()
+    for sibling in siblings:
+        if map_document_type_to_standard_folder(sibling["name"]) == mapped_folder_name:
+            return dict(sibling)
+            
+    # Fallback: create a new folder node
+    timestamp = now()
+    folder_id = f"node-auto-{hashlib.sha256(f'{course_id}:{mapped_folder_name}'.encode('utf-8')).hexdigest()[:12]}"
+    folder_path = f"{course['path']}/{mapped_folder_name}"
+    db.execute(
+        "INSERT OR IGNORE INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (folder_id, course["policy_id"], mapped_folder_name, course_id, "standard_folder", folder_path, "active", timestamp, timestamp),
+    )
+    return dict(db.execute("SELECT * FROM folder_nodes WHERE id=?", (folder_id,)).fetchone())
+
+
+def folder_assignment_from_metadata(db, specialization_id: str | None, course_id: str | None, document_type: str) -> dict:
+    node = standard_folder_for_selection(db, course_id, document_type)
+    folder_path = ""
+    folder_node_id = None
+    if node:
+        folder_node_id = node["id"]
+        folder_path = node["path"]
+    return {
+        "specialization_id": specialization_id,
+        "course_id": course_id,
+        "document_type": document_type,
+        "folder_node_id": folder_node_id,
+        "folder_path": safe_folder_path(folder_path) if folder_path else "",
+    }
+
+
+def normalize_document_folder_assignment(db, folder_node: dict | None, payload: dict, user: dict) -> dict:
+    document_type = payload.get("document_type") or payload.get("doc_type") or "Tài liệu khác"
+    
+    # 1. If folder_node is explicitly selected standard_folder
+    if folder_node and folder_node["type"] == "standard_folder":
+        return {"folder_node_id": folder_node["id"], "folder_path": folder_node["path"]}
+        
+    # 2. If folder_node is a course, resolve to standard folder
+    if folder_node and folder_node["type"] == "course":
+        assignment = folder_assignment_from_metadata(db, payload.get("specialization_id"), folder_node["id"], document_type)
+        if assignment["folder_node_id"]:
+            payload["course_id"] = folder_node["id"]
+            return {"folder_node_id": assignment["folder_node_id"], "folder_path": assignment["folder_path"]}
+        else:
+            raise ValueError("Không thể tìm thấy hoặc tạo thư mục chuẩn cho học phần.")
+            
+    # 3. If folder_node is specialization or faculty, raise ValueError
+    if folder_node and folder_node["type"] in {"specialization", "faculty"}:
+        raise ValueError("Tài liệu phải nằm trong thư mục loại tài liệu của một học phần, không được gắn trực tiếp vào chuyên môn hoặc khoa.")
+        
+    # 4. If no folder_node but course_id is provided in payload
+    if payload.get("course_id"):
+        assignment = folder_assignment_from_metadata(db, payload.get("specialization_id"), payload.get("course_id"), document_type)
+        if assignment["folder_node_id"]:
+            return {"folder_node_id": assignment["folder_node_id"], "folder_path": assignment["folder_path"]}
+        else:
+            raise ValueError("Không thể tìm thấy hoặc tạo thư mục chuẩn cho học phần.")
+            
+    # 5. Final fallback
+    folder_node_id = payload.get("folder_node_id")
+    folder_path = safe_folder_path(payload.get("folder_path") or suggest_folder(db, user, payload))
+    
+    # Double check that we don't return a course, specialization, or faculty node
+    if folder_node_id:
+        db_node = db.execute("SELECT type FROM folder_nodes WHERE id = ?", (folder_node_id,)).fetchone()
+        if db_node and db_node["type"] in {"course", "specialization", "faculty"}:
+            raise ValueError(f"Tài liệu phải nằm trong thư mục loại tài liệu của một học phần, không được gắn trực tiếp vào {db_node['type']}.")
+            
+    return {"folder_node_id": folder_node_id, "folder_path": folder_path}
+
+
 def enqueue_processing_jobs(db, document_id: str) -> list[dict]:
     timestamp = now()
     jobs = []
@@ -977,12 +1118,21 @@ def create_document(db, user: dict, payload: dict, defer_processing: bool = Fals
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     folder_node = validate_folder_access(db, user, payload.get("folder_node_id"))
-    folder_path = safe_folder_path(payload.get("folder_path") or (folder_node["path"] if folder_node else None) or suggest_folder(db, user, payload))
+    assignment = normalize_document_folder_assignment(db, dict(folder_node) if folder_node else None, payload, user)
+    folder_path = assignment["folder_path"]
+    folder_node_id = assignment["folder_node_id"]
+    document_type = payload.get("document_type") or payload["doc_type"]
     status = "UPLOADED" if defer_processing else "PROCESSING"
     db.execute(
-        "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id,status) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?)",
-        (doc_id, payload["title"], payload["doc_type"], payload["topic"], user["code"], payload["visibility"], digest, timestamp, timestamp, folder_path, payload.get("folder_node_id"), status),
+        "INSERT INTO documents(id,title,doc_type,topic,owner_code,visibility,current_version,content_hash,created_at,updated_at,folder_path,folder_node_id,status,specialization_id,course_id,document_type) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?)",
+        (doc_id, payload["title"], payload["doc_type"], payload["topic"], user["code"], payload["visibility"], digest, timestamp, timestamp, folder_path, folder_node_id, status, payload.get("specialization_id"), payload.get("course_id"), document_type),
     )
+    parent_folder_name = "None"
+    if folder_node_id:
+        folder_row = db.execute("SELECT name FROM folder_nodes WHERE id = ?", (folder_node_id,)).fetchone()
+        if folder_row:
+            parent_folder_name = folder_row["name"]
+    print(f"DEBUG UPLOAD: document_id={doc_id}, document_title={payload['title']}, parent_folder_id={folder_node_id}, parent_folder_name={parent_folder_name}")
     db.execute(
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", doc_id, 1, str(path), digest, user["code"], timestamp),
@@ -1070,12 +1220,17 @@ def update_document(db, user: dict, document: dict, payload: dict, defer_process
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", document["id"], version, str(path), digest, user["code"], now()),
     )
+    document_type = payload.get("document_type") or payload["doc_type"]
+    specialization_id = payload.get("specialization_id") if "specialization_id" in payload else document.get("specialization_id")
+    course_id = payload.get("course_id") if "course_id" in payload else document.get("course_id")
     folder_node = validate_folder_access(db, user, payload.get("folder_node_id") or document.get("folder_node_id"))
-    folder_node_id = payload.get("folder_node_id") if "folder_node_id" in payload else document.get("folder_node_id")
-    folder_path = safe_folder_path(payload.get("folder_path") or (folder_node["path"] if folder_node else None) or document.get("folder_path") or suggest_folder(db, user, payload))
+    assignment_payload = {**payload, "specialization_id": specialization_id, "course_id": course_id, "document_type": document_type}
+    assignment = normalize_document_folder_assignment(db, dict(folder_node) if folder_node else None, assignment_payload, user)
+    folder_node_id = assignment["folder_node_id"]
+    folder_path = assignment["folder_path"]
     db.execute(
-        "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=?,folder_node_id=?,status=? WHERE id=?",
-        (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, folder_node_id, "UPLOADED" if defer_processing else "PROCESSING", document["id"]),
+        "UPDATE documents SET title=?,doc_type=?,topic=?,visibility=?,current_version=?,content_hash=?,updated_at=?,folder_path=?,folder_node_id=?,status=?,specialization_id=?,course_id=?,document_type=? WHERE id=?",
+        (payload["title"], payload["doc_type"], payload["topic"], payload["visibility"], version, digest, now(), folder_path, folder_node_id, "UPLOADED" if defer_processing else "PROCESSING", specialization_id, course_id, document_type, document["id"]),
     )
     classification = "confidential" if "đề thi" in f"{payload['title']} {payload['doc_type']} {payload['topic']}".lower() else payload["visibility"]
     set_v2_state(db, document["id"], classification=classification, indexing_status="processing")
@@ -1099,8 +1254,57 @@ def rollback_document(db, user: dict, document: dict, target: int) -> dict:
     return update_document(db, user, document, {**document, "content": content})
 
 
+def _query_intent(question: str) -> dict:
+    normalized = question.lower()
+    wants_books = any(term in normalized for term in ("sách", "sach", "book", "giáo trình", "giao trinh", "tham khảo", "tham khao"))
+    wants_exam = any(term in normalized for term in ("đề thi", "de thi", "đáp án", "dap an", "exam", "kiểm tra", "kiem tra"))
+    ai_terms = ("ai", "trí tuệ nhân tạo", "tri tue nhan tao", "artificial intelligence", "machine learning", "học máy", "hoc may", "llm")
+    wants_ai = any(term in normalized for term in ai_terms)
+    return {"wants_books": wants_books, "wants_exam": wants_exam, "wants_ai": wants_ai}
+
+
+def _matches_query_intent(document: dict, content: str, intent: dict) -> bool:
+    searchable = f"{document['title']} {document['topic']} {document['doc_type']} {document.get('folder_path') or ''} {content}".lower()
+    if intent["wants_books"]:
+        book_terms = ("sách", "sach", "book", "giáo trình", "giao trinh", "tham khảo", "tham khao", "reference")
+        if not any(term in searchable for term in book_terms):
+            return False
+        exam_terms = ("đề thi", "de thi", "đáp án", "dap an", "ngân hàng câu hỏi", "ngan hang cau hoi", "exam")
+        if any(term in f"{document['title']} {document['doc_type']} {document.get('folder_path') or ''}".lower() for term in exam_terms):
+            return False
+    if intent["wants_ai"]:
+        ai_terms = ("ai", "trí tuệ nhân tạo", "tri tue nhan tao", "artificial intelligence", "machine learning", "học máy", "hoc may", "llm", "large language model")
+        if not any(term in searchable for term in ai_terms):
+            return False
+    if intent["wants_exam"]:
+        exam_terms = ("đề thi", "de thi", "đáp án", "dap an", "ngân hàng câu hỏi", "ngan hang cau hoi", "exam", "kiểm tra", "kiem tra")
+        if not any(term in searchable for term in exam_terms):
+            return False
+    return True
+
+
+def _no_matching_documents_answer(intent: dict) -> str:
+    if intent["wants_books"] and intent["wants_ai"]:
+        return (
+            "Mình chưa tìm thấy **sách AI** phù hợp trong những tài liệu bạn được phép xem.\n\n"
+            "Mình sẽ không dùng nguồn không đúng loại, ví dụ đề thi hoặc đáp án, để trả lời cho yêu cầu tìm sách.\n\n"
+            "### Bạn có cần gì thêm không?\n\n"
+            "- Tìm giáo trình hoặc tài liệu tham khảo theo tên học phần\n"
+            "- Tìm slide/bài giảng về AI\n"
+            "- Kiểm tra lại sau khi tài liệu mới được lập chỉ mục"
+        )
+    return (
+        "Mình chưa tìm thấy tài liệu phù hợp trong những tài liệu bạn được phép xem.\n\n"
+        "### Bạn có cần gì thêm không?\n\n"
+        "- Thử dùng tên học phần hoặc loại tài liệu cụ thể hơn\n"
+        "- Tìm theo chủ đề gần nghĩa\n"
+        "- Kiểm tra lại sau khi tài liệu mới được lập chỉ mục"
+    )
+
+
 def ask(db, user: dict, question: str) -> dict:
     allowed = {document["id"]: document for document in rag_documents(db, user)}
+    intent = _query_intent(question)
     query_vectors: dict[str, list[float]] = {}
     vector_matches = []
     for chunk in db.execute("SELECT * FROM chunks").fetchall():
@@ -1116,7 +1320,7 @@ def ask(db, user: dict, question: str) -> dict:
         vector_matches.append((similarity, document, chunk["content"]))
     vector_matches.sort(key=lambda item: item[0], reverse=True)
     if vector_matches and vector_matches[0][0] > 0:
-        matches = vector_matches[:3]
+        matches = vector_matches[:8]
     else:
         matches = []
     words = {word for word in re.findall(r"\w+", question.lower(), re.UNICODE) if len(word) > 2}
@@ -1127,20 +1331,19 @@ def ask(db, user: dict, question: str) -> dict:
         score = sum(word in searchable for word in words)
         if score:
             scored.append((score, document, content))
-    if not matches:
-        scored.sort(key=lambda item: item[0], reverse=True)
+    scored.sort(key=lambda item: item[0], reverse=True)
+    candidates = matches or scored
+    filtered = [(score, document, content) for score, document, content in candidates if _matches_query_intent(document, content, intent)]
+    if filtered:
+        matches = filtered[:3]
+    elif intent["wants_books"] or intent["wants_exam"] or intent["wants_ai"]:
+        matches = []
+    else:
         matches = scored[:3]
     audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "public_or_owned"})
     if not matches:
         return {
-            "answer": (
-                "Mình chưa tìm thấy nội dung phù hợp trong những tài liệu bạn được phép xem.\n\n"
-                "Bạn có thể thử dùng **tên học phần**, **chủ đề**, hoặc một cụm từ cụ thể hơn.\n\n"
-                "### Bạn có thể hỏi tiếp\n\n"
-                "- Tìm tài liệu theo chủ đề\n"
-                "- Giải thích một thuật ngữ cụ thể\n"
-                "- Liệt kê tài liệu tôi có thể xem"
-            ),
+            "answer": _no_matching_documents_answer(intent),
             "citations": [],
             "scope": "public_or_owned",
         }

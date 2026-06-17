@@ -98,7 +98,6 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   LECTURER: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
     { label: "Kho của tôi", href: "/repository", permission: "repository.own", icon: "repository" },
-    { label: "Tải tài liệu", href: "/repository?upload=1", permission: "repository.upload", icon: "upload" },
     { label: "Lịch sử phiên bản", href: "/versions", permission: "versions.view", icon: "versions" },
     { label: "Chatbot", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
     { label: "Hồ sơ", href: "/profile", permission: "profile.manage", icon: "profile" },

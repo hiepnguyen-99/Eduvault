@@ -22,7 +22,7 @@ from .database import DATA_DIR, ROOT, connection, database_backend, hash_secret,
 from .infrastructure import infrastructure_status
 from .services import (
     anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup, delete_policy_file,
-    DOCUMENT_TYPES, create_document, create_policy_file, enqueue_processing_jobs, extract_text, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
+    DOCUMENT_TYPES, active_course_suggestions, active_policy, create_document, create_policy_file, enqueue_processing_jobs, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
     list_deleted_documents, list_documents, list_policy_files, master_tree, permanently_delete_document,
     build_lecturer_folder_tree, profile_specializations, public_specializations, quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
     quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
@@ -138,6 +138,14 @@ class UploadInitInput(BaseModel):
     folder_path: str | None = None
     folder_node_id: str | None = None
     existing_document_id: str | None = None
+
+
+class UploadConfirmInput(BaseModel):
+    specialization_id: str | None = None
+    course_id: str | None = None
+    folder_node_id: str | None = None
+    document_type: str = Field(min_length=2, max_length=80)
+    visibility: Literal["public", "private"]
 
 
 class SpecializationSelection(BaseModel):
@@ -607,6 +615,63 @@ def upload_task_public(task) -> dict:
     return item
 
 
+def classification_ticket_public(ticket) -> dict:
+    item = dict(ticket)
+    item["suggestions"] = json.loads(item["suggestions"])
+    return item
+
+
+def create_classification_ticket(db, task, user: dict) -> dict:
+    existing = db.execute(
+        "SELECT * FROM document_classification_tickets WHERE upload_task_id=? ORDER BY created_at DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    if existing and existing["status"] in {"PENDING_CONFIRMATION", "CONFIRMED"}:
+        return classification_ticket_public(existing)
+    raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+    preview = quick_preview_text(task["filename"], task["mime_type"], raw)
+    metadata = json.loads(task["metadata"])
+    suggestions = active_course_suggestions(db, task["filename"], preview)
+    top = suggestions[0] if suggestions else {}
+    text = f"{task['filename']} {preview}".casefold()
+    suggested_type = metadata.get("doc_type") if metadata.get("doc_type") in DOCUMENT_TYPES else "Tài liệu khác"
+    for candidate in DOCUMENT_TYPES:
+        if candidate.casefold() in text or candidate.replace(" ", "_").casefold() in text:
+            suggested_type = candidate
+            break
+    confidence = float(top.get("confidence") or 0)
+    reasoning = (
+        f"AI đọc nhanh tên file và 1-2 trang đầu. Gợi ý học phần '{top.get('course', '')}' "
+        f"vì nội dung/tên file có độ khớp {round(confidence * 100)}%."
+        if top else
+        "AI đọc nhanh tên file và 1-2 trang đầu nhưng chưa tìm thấy học phần khớp đủ rõ trong Master Tree."
+    )
+    ticket_id = f"ticket-{secrets.token_hex(8)}"
+    timestamp = now()
+    db.execute(
+        """INSERT INTO document_classification_tickets(
+           id,upload_task_id,user_code,filename,suggested_specialization_id,suggested_specialization,
+           suggested_course_id,suggested_course,suggested_document_type,suggested_visibility,confidence,
+           reasoning,suggestions,selected_specialization_id,selected_course_id,selected_document_type,
+           selected_visibility,status,document_id,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDING_CONFIRMATION', NULL, ?, ?)""",
+        (
+            ticket_id, task["id"], user["code"], task["filename"], top.get("specialization_id"), top.get("specialization"),
+            top.get("course_id"), top.get("course"), suggested_type, metadata.get("visibility", "private"), confidence,
+            reasoning, json.dumps(suggestions, ensure_ascii=False), top.get("specialization_id"), top.get("course_id"),
+            suggested_type, metadata.get("visibility", "private"), timestamp, timestamp,
+        ),
+    )
+    ticket = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket_id,)).fetchone())
+    task_metadata = {**metadata, "classification_ticket": ticket}
+    db.execute(
+        "UPDATE upload_tasks SET status='pending_confirmation',metadata=?,error=NULL,updated_at=? WHERE id=?",
+        (json.dumps(task_metadata, ensure_ascii=False), timestamp, task["id"]),
+    )
+    audit(db, user["code"], "upload.classification_ticket", "upload_task", task["id"], {"ticket_id": ticket_id, "confidence": confidence})
+    return ticket
+
+
 def process_upload_task(task_id: str) -> None:
     try:
         with transaction() as db:
@@ -836,23 +901,102 @@ async def upload_chunk(
 
 
 @app.post("/api/uploads/{task_id}/analyze", status_code=202)
-def analyze_upload(task_id: str, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
-    with connection() as db:
+def analyze_upload(task_id: str, user: dict = Depends(current_user)):
+    with transaction() as db:
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
-            raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
+            raise HTTPException(404, "Khong tim thay tac vu tai len.")
         if task["uploaded_bytes"] != task["total_bytes"]:
-            raise HTTPException(409, "File chưa được tải lên đầy đủ.")
-        if task["status"] == "completed":
+            raise HTTPException(409, "File chua duoc tai len day du.")
+        if task["status"] in {"completed", "processing"}:
             return upload_task_public(task)
-    try:
-        document_id = save_upload_task_fast(task_id)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc))
-    with connection() as db:
+        create_classification_ticket(db, task, dict(user))
         result = upload_task_public(db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone())
-    background_tasks.add_task(process_document_background, document_id, task_id)
     return result
+
+
+@app.post("/api/uploads/{task_id}/confirm", status_code=201)
+def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
+    if payload.document_type not in DOCUMENT_TYPES:
+        raise HTTPException(422, "Loai tai lieu khong hop le.")
+    with transaction() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
+        if not task:
+            raise HTTPException(404, "Khong tim thay tac vu tai len.")
+        if task["uploaded_bytes"] != task["total_bytes"]:
+            raise HTTPException(409, "File chua duoc tai len day du.")
+        ticket = db.execute(
+            "SELECT * FROM document_classification_tickets WHERE upload_task_id=? AND user_code=? ORDER BY created_at DESC LIMIT 1",
+            (task_id, user["code"]),
+        ).fetchone()
+        if not ticket:
+            ticket = create_classification_ticket(db, task, dict(user))
+            ticket = db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket["id"],)).fetchone()
+        if ticket["status"] == "CONFIRMED" and ticket["document_id"]:
+            return {"ticket": classification_ticket_public(ticket), "document": dict(db.execute("SELECT * FROM documents WHERE id=?", (ticket["document_id"],)).fetchone())}
+
+        metadata = json.loads(task["metadata"])
+        final_specialization_id = payload.specialization_id
+        final_course_id = payload.course_id
+        final_document_type = payload.document_type
+        selected_node = validate_folder_access(db, user, payload.folder_node_id) if payload.folder_node_id else None
+        if selected_node and selected_node["type"] in {"specialization", "faculty"}:
+            raise HTTPException(400, "Tai lieu phai duoc luu trong hoc phan hoac thu muc loai tai lieu.")
+        if selected_node and selected_node["type"] == "standard_folder":
+            final_document_type = selected_node["name"]
+            final_course_id = selected_node["parent_id"]
+        elif selected_node and selected_node["type"] == "course":
+            final_course_id = selected_node["id"]
+        selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
+        if selected_course:
+            spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
+            specialization = db.execute("SELECT * FROM specializations WHERE folder_node_id=?", (spec_node["id"],)).fetchone() if spec_node else None
+            final_specialization_id = specialization["id"] if specialization else final_specialization_id
+        assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
+        if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
+            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
+        title = metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem
+        topic = selected_course["name"] if selected_course else metadata.get("topic") or final_document_type
+        raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+        preview = quick_preview_text(task["filename"], task["mime_type"], raw)
+        document_payload = {
+            "title": title,
+            "topic": topic,
+            "doc_type": final_document_type,
+            "document_type": final_document_type,
+            "visibility": payload.visibility,
+            "folder_path": assignment["folder_path"],
+            "folder_node_id": assignment["folder_node_id"],
+            "specialization_id": final_specialization_id,
+            "course_id": final_course_id,
+            "content": f"File: {task['filename']}\nStatus: SAVED. AI processing is waiting in background.\n\n{preview[:4000]}",
+        }
+        existing_id = metadata.get("existing_document_id")
+        if existing_id:
+            document = update_document(db, dict(user), get_active_document(db, existing_id), document_payload, defer_processing=True)
+            version_no = document["current_version"]
+        else:
+            document = create_document(db, dict(user), document_payload, defer_processing=True)
+            version_no = 1
+        asset = save_file_asset(db, document["id"], version_no, task["filename"], task["mime_type"], raw, defer_processing=True)
+        enqueue_processing_jobs(db, document["id"])
+        db.execute(
+            "UPDATE documents SET status='SAVED',specialization_id=?,course_id=?,document_type=?,folder_node_id=?,folder_path=?,updated_at=? WHERE id=?",
+            (final_specialization_id, final_course_id, final_document_type, assignment["folder_node_id"], assignment["folder_path"], now(), document["id"]),
+        )
+        db.execute(
+            "UPDATE document_classification_tickets SET selected_specialization_id=?,selected_course_id=?,selected_document_type=?,selected_visibility=?,status='CONFIRMED',document_id=?,updated_at=? WHERE id=?",
+            (final_specialization_id, final_course_id, final_document_type, payload.visibility, document["id"], now(), ticket["id"]),
+        )
+        db.execute(
+            "UPDATE upload_tasks SET status='processing',document_id=?,error=NULL,updated_at=? WHERE id=?",
+            (document["id"], now(), task_id),
+        )
+        audit(db, user["code"], "upload.confirmed", "document", document["id"], {"ticket_id": ticket["id"], "asset_id": asset["id"]})
+        document = dict(db.execute("SELECT * FROM documents WHERE id=?", (document["id"],)).fetchone())
+        ticket_public = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket["id"],)).fetchone())
+    background_tasks.add_task(process_document_background, document["id"], task_id)
+    return {"ticket": ticket_public, "document": document, "asset": asset}
 
 
 @app.get("/api/uploads")

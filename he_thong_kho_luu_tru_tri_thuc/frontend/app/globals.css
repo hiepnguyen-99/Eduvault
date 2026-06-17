@@ -70,9 +70,12 @@ button { cursor: pointer; }
 .progress > i { display:block; height:100%; border-radius:inherit; background:var(--blue); }
 .mini-grid { background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg,var(--border) 1px,transparent 1px); background-size:24px 24px; }
 
-@media (max-width: 1024px) {
+.sidebar-toggle { display:none; }
+
+@media (max-width: 900px) {
   .desktop-sidebar { display:none; }
   .main-offset { margin-left:0 !important; }
+  .sidebar-toggle { display:inline-flex; }
 }
 
 .ai-result { font-size: 0.875rem; line-height: 1.7; color: var(--text); }
