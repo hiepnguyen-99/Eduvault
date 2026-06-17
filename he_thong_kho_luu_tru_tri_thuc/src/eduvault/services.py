@@ -558,6 +558,11 @@ def validate_folder_access(db, user: dict, folder_node_id: str | None) -> dict |
     return dict(node)
 
 
+def assert_document_destination_node(node: dict | None) -> None:
+    if node and node["type"] in {"faculty", "specialization", "course"}:
+        raise ValueError("Document must be saved inside a document-type folder.")
+
+
 def get_my_folder_tree(db, user: dict) -> dict:
     policy = active_policy(db)
     if not policy:
@@ -991,29 +996,20 @@ def folder_assignment_from_metadata(db, specialization_id: str | None, course_id
 
 
 def normalize_document_folder_assignment(db, folder_node: dict | None, payload: dict, user: dict) -> dict:
+    assert_document_destination_node(folder_node)
     document_type = payload.get("document_type") or payload.get("doc_type") or "Tài liệu khác"
     
     # 1. If folder_node is explicitly selected standard_folder
-    if folder_node and folder_node["type"] == "standard_folder":
+    if folder_node and folder_node["type"] in {"standard_folder", "folder", "document_type_folder"}:
+        assert_document_destination_node(folder_node)
         return {"folder_node_id": folder_node["id"], "folder_path": folder_node["path"]}
         
-    # 2. If folder_node is a course, resolve to standard folder
-    if folder_node and folder_node["type"] == "course":
-        assignment = folder_assignment_from_metadata(db, payload.get("specialization_id"), folder_node["id"], document_type)
-        if assignment["folder_node_id"]:
-            payload["course_id"] = folder_node["id"]
-            return {"folder_node_id": assignment["folder_node_id"], "folder_path": assignment["folder_path"]}
-        else:
-            raise ValueError("Không thể tìm thấy hoặc tạo thư mục chuẩn cho học phần.")
-            
-    # 3. If folder_node is specialization or faculty, raise ValueError
-    if folder_node and folder_node["type"] in {"specialization", "faculty"}:
-        raise ValueError("Tài liệu phải nằm trong thư mục loại tài liệu của một học phần, không được gắn trực tiếp vào chuyên môn hoặc khoa.")
-        
-    # 4. If no folder_node but course_id is provided in payload
+    # 2. If no folder_node but course_id is provided in payload
     if payload.get("course_id"):
         assignment = folder_assignment_from_metadata(db, payload.get("specialization_id"), payload.get("course_id"), document_type)
         if assignment["folder_node_id"]:
+            destination = db.execute("SELECT * FROM folder_nodes WHERE id = ?", (assignment["folder_node_id"],)).fetchone()
+            assert_document_destination_node(dict(destination) if destination else None)
             return {"folder_node_id": assignment["folder_node_id"], "folder_path": assignment["folder_path"]}
         else:
             raise ValueError("Không thể tìm thấy hoặc tạo thư mục chuẩn cho học phần.")
@@ -1132,7 +1128,13 @@ def create_document(db, user: dict, payload: dict, defer_processing: bool = Fals
         folder_row = db.execute("SELECT name FROM folder_nodes WHERE id = ?", (folder_node_id,)).fetchone()
         if folder_row:
             parent_folder_name = folder_row["name"]
-    print(f"DEBUG UPLOAD: document_id={doc_id}, document_title={payload['title']}, parent_folder_id={folder_node_id}, parent_folder_name={parent_folder_name}")
+    print(json.dumps({
+        "event": "DEBUG_UPLOAD",
+        "document_id": doc_id,
+        "document_title": payload["title"],
+        "parent_folder_id": folder_node_id,
+        "parent_folder_name": parent_folder_name,
+    }, ensure_ascii=True))
     db.execute(
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", doc_id, 1, str(path), digest, user["code"], timestamp),
@@ -1511,8 +1513,12 @@ def quality_report(db) -> dict:
 
 def usage_report(db) -> dict:
     actions = rows(db.execute("SELECT action,COUNT(*) count FROM audit_logs GROUP BY action ORDER BY count DESC").fetchall())
+    action_events = rows(db.execute(
+        "SELECT action,actor_code,created_at FROM audit_logs ORDER BY id DESC LIMIT 100"
+    ).fetchall())
     return {
         "actions": actions,
+        "action_events": action_events,
         "documents": db.execute("SELECT COUNT(*) count FROM documents").fetchone()["count"],
         "users": db.execute("SELECT COUNT(*) count FROM users WHERE active=1").fetchone()["count"],
         "queries": db.execute("SELECT COUNT(*) count FROM audit_logs WHERE action='rag.ask'").fetchone()["count"],
