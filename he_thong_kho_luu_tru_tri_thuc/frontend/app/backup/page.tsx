@@ -63,15 +63,11 @@ export default function Backup() {
 
   async function connect(provider: CloudConnection["provider"]) {
     setMessage("");
-    try {
-      const result = await request<{ authorization_url: string }>("/api/cloud/connect", {
-        method: "POST",
-        body: JSON.stringify({ provider }),
-      });
-      window.open(result.authorization_url, "_blank", "noopener,noreferrer");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không thể khởi động kết nối OAuth.");
-    }
+    const result = await request<{ authorization_url: string }>("/api/cloud/connect", {
+      method: "POST",
+      body: JSON.stringify({ provider }),
+    });
+    window.open(result.authorization_url, "_blank", "noopener,noreferrer");
   }
 
   async function sync(provider: CloudConnection["provider"]) {
@@ -113,17 +109,8 @@ export default function Backup() {
           <p className="muted mt-3 text-xs">{connection.account_email || (connection.configured ? "Sẵn sàng kết nối" : "OAuth chưa được cấu hình")}</p>
           <p className="muted mt-1 text-[10px]">Đồng bộ gần nhất: {formatDate(connection.last_sync_at)}</p>
           {connection.last_error && <p className="mt-2 text-[10px] text-red-600">{connection.last_error}</p>}
-          {!connection.configured && (
-            <p className="mt-2 rounded bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-              {connection.provider === "google_drive"
-                ? <>Chưa cấu hình OAuth — cần thêm <code className="font-mono">GOOGLE_CLIENT_ID</code>, <code className="font-mono">GOOGLE_CLIENT_SECRET</code>, <code className="font-mono">GOOGLE_REDIRECT_URI</code> vào file <code className="font-mono">.env</code>.</>
-                : <>Chưa cấu hình OAuth — cần thêm <code className="font-mono">MICROSOFT_CLIENT_ID</code>, <code className="font-mono">MICROSOFT_CLIENT_SECRET</code>, <code className="font-mono">MICROSOFT_REDIRECT_URI</code> vào file <code className="font-mono">.env</code>.</>}
-            </p>
-          )}
           <div className="mt-4 flex gap-2">
-            {connection.connected
-              ? <button className="btn-primary" disabled={syncing === connection.provider} onClick={() => sync(connection.provider)}>{syncing === connection.provider ? <LoaderCircle className="animate-spin" size={14}/> : <RefreshCw size={14}/>}Đồng bộ ngay</button>
-              : <button className="btn-secondary" onClick={() => connect(connection.provider)}>Kết nối</button>}
+            {connection.connected ? <button className="btn-primary" disabled={syncing === connection.provider} onClick={() => sync(connection.provider)}>{syncing === connection.provider ? <LoaderCircle className="animate-spin" size={14}/> : <RefreshCw size={14}/>}Đồng bộ ngay</button> : <button className="btn-secondary" disabled={!connection.configured} onClick={() => connect(connection.provider)}>Kết nối</button>}
           </div>
         </div>)}
       </div>

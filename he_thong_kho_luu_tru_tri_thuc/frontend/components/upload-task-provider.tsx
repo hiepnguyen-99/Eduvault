@@ -27,6 +27,27 @@ export type UploadMetadata = {
     visibility: "public" | "private";
     folder_path: string;
   };
+  quick_suggestion?: {
+    specialization?: string;
+    course?: string;
+    confidence?: number;
+    folder_path?: string;
+  };
+  classification_ticket?: {
+    id: string;
+    filename: string;
+    suggested_specialization_id?: string;
+    suggested_specialization?: string;
+    suggested_course_id?: string;
+    suggested_course?: string;
+    suggested_document_type?: string;
+    suggested_visibility: "public" | "private";
+    confidence: number;
+    reasoning: string;
+    suggestions: { specialization_id: string; specialization: string; course_id: string; course: string; confidence: number }[];
+    status: "PENDING_CONFIRMATION" | "CONFIRMED";
+    document_id?: string;
+  };
 };
 
 export type UploadTask = {
@@ -35,7 +56,7 @@ export type UploadTask = {
   mime_type: string;
   total_bytes: number;
   uploaded_bytes: number;
-  status: "uploading" | "uploaded" | "analyzing" | "saving_metadata" | "completed" | "failed";
+  status: "uploading" | "uploaded" | "analyzing" | "saving_metadata" | "pending_confirmation" | "processing" | "completed" | "failed";
   metadata: UploadMetadata;
   document_id?: string;
   error?: string;
@@ -58,7 +79,9 @@ const statusLabels: Record<UploadTask["status"], string> = {
   uploaded: "Đã tải file gốc",
   analyzing: "Đang AI phân tích",
   saving_metadata: "Đang lưu metadata",
-  completed: "Hoàn tất",
+  pending_confirmation: "Chờ xác nhận phân loại",
+  processing: "Đã lưu, AI đang xử lý",
+  completed: "Đã lưu, AI xử lý nền",
   failed: "Thất bại",
 };
 

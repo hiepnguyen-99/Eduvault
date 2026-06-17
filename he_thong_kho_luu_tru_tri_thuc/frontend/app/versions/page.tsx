@@ -60,8 +60,8 @@ function VersionWorkspace({document}:{document:Document}){
 }
 
 function VersionComparison({documentId,versions,baseVersion,targetVersion,setBaseVersion,setTargetVersion}:{documentId:string;versions:Version[];baseVersion:number;targetVersion:number;setBaseVersion:(value:number)=>void;setTargetVersion:(value:number)=>void}){
-  const effectiveBase=baseVersion||versions[1]?.version_no||versions[0]?.version_no||0;
-  const effectiveTarget=targetVersion||versions[0]?.version_no||0;
+  const effectiveBase=baseVersion||versions[1].version_no;
+  const effectiveTarget=targetVersion||versions[0].version_no;
   const path=`/api/documents/${documentId}/versions/compare?base_version=${effectiveBase}&target_version=${effectiveTarget}`;
   const {data,error}=useBackendData<Comparison>(path,emptyComparison);
 
