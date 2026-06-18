@@ -27,8 +27,8 @@ function ProfileContent() {
   const { user, request } = useAuth();
   const { data: profile, reload: reloadProfile } = useBackendData<ProfileSpecializations>("/api/profile/specializations", emptyProfile);
   const { data: myRequests, reload: reloadRequests } = useBackendData<UpdateRequest[]>("/api/profile/update-requests", []);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const selected = useMemo(() => new Set(selectedIds.length ? selectedIds : profile.selected_ids), [selectedIds, profile.selected_ids]);
+  const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
+  const selected = useMemo(() => new Set(selectedIds ?? profile.selected_ids), [selectedIds, profile.selected_ids]);
   const roleLabel = user ? ROLE_LABELS[toAppRole(user.role)] : "";
 
   // Update info request form
@@ -46,6 +46,8 @@ function ProfileContent() {
   const [confirmPw, setConfirmPw] = useState("");
   const [pwMsg, setPwMsg] = useState("");
   const [pwLoading, setPwLoading] = useState(false);
+  const [specializationMsg, setSpecializationMsg] = useState("");
+  const [specializationLoading, setSpecializationLoading] = useState(false);
 
   const hasPending = myRequests.some(r => r.status === "pending");
 
@@ -95,6 +97,8 @@ function ProfileContent() {
   }
 
   async function saveSpecializations() {
+    setSpecializationLoading(true);
+    setSpecializationMsg("");
     try {
       const result = await request<ProfileSpecializations & { message?: string }>(
         "/api/profile/specializations",
@@ -102,12 +106,17 @@ function ProfileContent() {
       );
       setSelectedIds(result.selected_ids);
       await reloadProfile();
-    } catch { /* silent */ }
+      setSpecializationMsg(result.message || "Đã cập nhật nhóm chuyên môn.");
+    } catch (err) {
+      setSpecializationMsg(err instanceof Error ? err.message : "Không thể lưu nhóm chuyên môn.");
+    } finally {
+      setSpecializationLoading(false);
+    }
   }
 
   function toggle(id: string) {
     setSelectedIds(cur => {
-      const next = new Set(cur.length ? cur : profile.selected_ids);
+      const next = new Set(cur ?? profile.selected_ids);
       if (next.has(id)) next.delete(id); else next.add(id);
       return [...next];
     });
@@ -248,6 +257,11 @@ function ProfileContent() {
           <Panel title="Nhóm chuyên môn">
             <div className="space-y-3 p-5">
               {!profile.policy && <p className="rounded bg-amber-50 p-3 text-xs text-amber-800">Hệ thống chưa có policy active. Vui lòng liên hệ Admin.</p>}
+              {specializationMsg && (
+                <p className={`rounded p-3 text-xs ${specializationMsg.startsWith("Đã") ? "bg-emerald-50 text-emerald-800" : "bg-red-50 text-red-700"}`}>
+                  {specializationMsg}
+                </p>
+              )}
               {profile.available.map(spec => (
                 <label key={spec.id} className="flex items-center gap-3 rounded-lg border border-[var(--border)] p-3 text-sm cursor-pointer hover:bg-[var(--soft)]">
                   <input type="checkbox" checked={selected.has(spec.id)} onChange={() => toggle(spec.id)}/>
@@ -259,8 +273,8 @@ function ProfileContent() {
               ))}
               {!profile.available.length && profile.policy && <p className="muted text-xs">Policy active chưa có nhóm chuyên môn.</p>}
               {profile.available.length > 0 && (
-                <button className="btn-primary w-full mt-2" onClick={saveSpecializations}>
-                  <Save size={14}/>Lưu nhóm chuyên môn
+                <button className="btn-primary w-full mt-2 disabled:opacity-50" disabled={specializationLoading || !profile.policy} onClick={saveSpecializations}>
+                  <Save size={14}/>{specializationLoading ? "Đang lưu..." : "Lưu nhóm chuyên môn"}
                 </button>
               )}
             </div>

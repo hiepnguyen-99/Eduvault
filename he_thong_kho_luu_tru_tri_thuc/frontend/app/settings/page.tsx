@@ -24,10 +24,10 @@ export default function Settings() {
   const {data:profile,reload:reloadProfile}=useBackendData<ProfileSpecializations>("/api/profile/specializations",emptyProfile);
   const [policyFile,setPolicyFile]=useState<File|null>(null);
   const [policyTitle,setPolicyTitle]=useState("Policy hoc lieu khoa CNTT");
-  const [selectedIds,setSelectedIds]=useState<string[]>([]);
+  const [selectedIds,setSelectedIds]=useState<string[]|null>(null);
   const [message,setMessage]=useState("");
   const permission=policies.find(x=>x.key==="permission_rules");
-  const selected=useMemo(()=>new Set(selectedIds.length?selectedIds:profile.selected_ids),[selectedIds,profile.selected_ids]);
+  const selected=useMemo(()=>new Set(selectedIds??profile.selected_ids),[selectedIds,profile.selected_ids]);
 
   async function uploadPolicy(){
     if(!policyFile)return;
@@ -71,7 +71,7 @@ export default function Settings() {
 
   function toggleSpec(id:string){
     setSelectedIds(current=>{
-      const next=new Set(current.length?current:profile.selected_ids);
+      const next=new Set(current??profile.selected_ids);
       if(next.has(id))next.delete(id);else next.add(id);
       return [...next];
     });

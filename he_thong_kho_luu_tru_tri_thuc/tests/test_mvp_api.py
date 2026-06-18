@@ -597,6 +597,48 @@ def test_chatbot_stream_emits_status_deltas_and_citations():
             assert any(event["type"] == "delta" and event["text"] for event in events)
             assert events[-1]["type"] == "complete"
             assert "citations" in events[-1]
+            assert "trace_id" in events[-1]
+            assert "verification" in events[-1]
+
+
+def test_prd_search_trace_filters_and_feedback_are_persisted():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+
+            response = client.post(
+                "/api/search",
+                headers=lecturer,
+                json={
+                    "question": "tai lieu RAG pipeline noi ve gi",
+                    "filters": {"doc_type": "Học liệu"},
+                },
+            )
+
+            assert response.status_code == 200
+            result = response.json()
+            assert result["intent"] in {"document_lookup", "topic_search", "question_answer"}
+            assert "tài liệu" in result["rewritten_query"]
+            assert result["trace_id"].startswith("trace-")
+            assert result["verification"]["status"] in {"grounded", "weak_evidence"}
+            assert result["trace"]["filters"]["doc_type"] == "Học liệu"
+            assert result["trace"]["retrieved"]
+            assert result["citations"]
+            assert all("chunk" in item and item["chunk"] for item in result["citations"])
+            assert all(item["id"] != "doc-de-cuong-ai" for item in result["citations"])
+
+            feedback = client.post(
+                "/api/search/feedback",
+                headers=lecturer,
+                json={"trace_id": result["trace_id"], "rating": "wrong_source", "reason": "Sai nguồn", "detail": "Nguồn chưa phù hợp."},
+            )
+            assert feedback.status_code == 201
+
+            admin = login(client, "ADMIN")
+            usage = client.get("/api/reports/usage", headers=admin).json()
+            assert any(item["query"] == result["rewritten_query"] for item in usage["popular_queries"])
+            assert any(item["rating"] == "wrong_source" for item in usage["bad_feedback"])
 
 
 def test_chatbot_book_request_does_not_cite_exam_documents():
@@ -814,7 +856,7 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
                     {
                         "name": "Tri tue nhan tao",
                         "courses": [
-                            {"name": "AI Application", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+                            {"name": "AI Application", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi", "Tai lieu tham khao"]},
                             {"name": "Machine Learning", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
                             {"name": "Natural Language Processing", "standard_folders": ["Bai giang", "Slide", "Tai lieu tham khao", "Video bai giang"]},
                         ],
@@ -887,6 +929,7 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
             ai_course = next(child for child in my_tree["children"][0]["children"] if child["name"] == "AI Application")
             nlp_course = next(child for child in my_tree["children"][0]["children"] if child["name"] == "Natural Language Processing")
             nlp_reference = next(child for child in nlp_course["children"] if child["name"] == "Tai lieu tham khao")
+            ai_reference = next(child for child in ai_course["children"] if child["name"] == "Tai lieu tham khao")
             ai_lab = next(child for child in ai_course["children"] if child["name"] == "Lab")
             ai_exam = next(child for child in ai_course["children"] if child["name"] == "De thi")
 
@@ -910,7 +953,7 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
                     "SELECT COUNT(*) count FROM lecturer_folder_nodes WHERE user_code='GV001' AND status='active'"
                 ).fetchone()["count"]
             repeat_tree = client.get("/api/lecturers/GV001/folder-tree", headers=lecturer).json()
-            assert active_clones == 1 + 3 + 12
+            assert active_clones == 1 + 3 + 13
             assert repeat_tree[0]["children"][0]["children"][0]["children"][0]["type"] == "folder"
 
             forbidden = client.post(
@@ -1058,6 +1101,46 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
             assert manual_document["folder_node_id"] == ai_exam["id"]
             assert manual_document["course_id"] == ai_course["id"]
             assert manual_document["document_type"] == "De thi"
+
+            raw_reference = b"Manual reference destination should ignore AI suggestions"
+            reference_init = client.post(
+                "/api/uploads/init",
+                headers=lecturer,
+                json={
+                    "filename": "manual-reference.txt",
+                    "mime_type": "text/plain",
+                    "total_bytes": len(raw_reference),
+                    "title": "Manual reference destination",
+                    "topic": "AI Application",
+                    "doc_type": "SÃ¡ch tham kháº£o",
+                    "visibility": "public",
+                },
+            )
+            assert reference_init.status_code == 201
+            reference_task_id = reference_init.json()["id"]
+            assert client.post(
+                f"/api/uploads/{reference_task_id}/file",
+                headers={**lecturer, "X-Upload-Offset": "0", "Content-Type": "application/octet-stream"},
+                content=raw_reference,
+            ).status_code == 200
+            assert client.post(f"/api/uploads/{reference_task_id}/analyze", headers=lecturer).status_code == 202
+            confirmed_reference = client.post(
+                f"/api/uploads/{reference_task_id}/confirm",
+                headers=lecturer,
+                json={
+                    "specialization_id": ai_spec["id"],
+                    "course_id": ai_course["id"],
+                    "folder_node_id": ai_reference["id"],
+                    "document_type": "SÃ¡ch tham kháº£o",
+                    "visibility": "public",
+                    "final_destination_source": "manual",
+                },
+            )
+            assert confirmed_reference.status_code == 201
+            reference_document = confirmed_reference.json()["document"]
+            assert reference_document["folder_node_id"] == ai_reference["id"]
+            assert reference_document["course_id"] == ai_course["id"]
+            assert reference_document["document_type"] == ai_reference["name"]
 
             both = client.put(
                 "/api/profile/specializations",

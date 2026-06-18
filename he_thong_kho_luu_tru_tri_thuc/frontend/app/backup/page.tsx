@@ -74,9 +74,14 @@ export default function Backup() {
     setSyncing(provider);
     setMessage("");
     try {
-      const result = await request<{ results: { status: string }[] }>(`/api/cloud/connections/${provider}/sync`, { method: "POST" });
+      const result = await request<{ results: { status: string; detail?: string }[] }>(`/api/cloud/connections/${provider}/sync`, { method: "POST" });
       const succeeded = result.results.filter(item => item.status === "success").length;
-      setMessage(`Đã đồng bộ thành công ${succeeded}/${result.results.length} tài liệu.`);
+      const failed = result.results.length - succeeded;
+      const firstError = result.results.find(item => item.status !== "success")?.detail;
+      setMessage(failed
+        ? `Đồng bộ thành công ${succeeded}/${result.results.length} tài liệu. ${failed} tài liệu lỗi${firstError ? `: ${firstError}` : "."}`
+        : `Đã đồng bộ thành công ${succeeded}/${result.results.length} tài liệu.`
+      );
       await reloadConnections();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Không thể đồng bộ kho cloud.");
@@ -110,7 +115,10 @@ export default function Backup() {
           <p className="muted mt-1 text-[10px]">Đồng bộ gần nhất: {formatDate(connection.last_sync_at)}</p>
           {connection.last_error && <p className="mt-2 text-[10px] text-red-600">{connection.last_error}</p>}
           <div className="mt-4 flex gap-2">
-            {connection.connected ? <button className="btn-primary" disabled={syncing === connection.provider} onClick={() => sync(connection.provider)}>{syncing === connection.provider ? <LoaderCircle className="animate-spin" size={14}/> : <RefreshCw size={14}/>}Đồng bộ ngay</button> : <button className="btn-secondary" disabled={!connection.configured} onClick={() => connect(connection.provider)}>Kết nối</button>}
+            {connection.connected ? <>
+              <button className="btn-primary" disabled={syncing === connection.provider} onClick={() => sync(connection.provider)}>{syncing === connection.provider ? <LoaderCircle className="animate-spin" size={14}/> : <RefreshCw size={14}/>}Đồng bộ ngay</button>
+              {connection.last_error && <button className="btn-secondary" disabled={!connection.configured} onClick={() => connect(connection.provider)}>Kết nối lại</button>}
+            </> : <button className="btn-secondary" disabled={!connection.configured} onClick={() => connect(connection.provider)}>Kết nối</button>}
           </div>
         </div>)}
       </div>

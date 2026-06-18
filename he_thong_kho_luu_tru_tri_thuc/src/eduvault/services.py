@@ -5,6 +5,7 @@ import hashlib
 import math
 import re
 import shutil
+import unicodedata
 import uuid
 import zipfile
 from io import BytesIO
@@ -34,6 +35,7 @@ DOCUMENT_TYPES = [
     "Slide",
     "Giáo trình",
     "Sách tham khảo",
+    "Tài liệu tham khảo",
     "Lab",
     "Bài tập",
     "Đồ án",
@@ -1343,58 +1345,240 @@ def merge_ranked_matches(candidates: list[tuple[float, dict, str]]) -> list[tupl
     return sorted(best.values(), key=lambda item: item[0], reverse=True)
 
 
-def ask(db, user: dict, question: str) -> dict:
+def strip_accents(value: str) -> str:
+    return "".join(
+        char for char in unicodedata.normalize("NFD", value)
+        if unicodedata.category(char) != "Mn"
+    ).replace("đ", "d").replace("Đ", "D")
+
+
+def search_policy(db) -> dict:
+    default = {
+        "lexical_weight": 0.62,
+        "vector_weight": 0.38,
+        "title_boost": 3.0,
+        "top_k": 8,
+        "rerank_k": 5,
+        "confidence_threshold": 1.0,
+        "decompose_min_chars": 120,
+        "synonyms": {
+            "ai": ["trí tuệ nhân tạo", "artificial intelligence"],
+            "cntt": ["công nghệ thông tin", "khoa cntt"],
+            "rag": ["retrieval augmented generation", "retrieval-augmented generation"],
+            "đề thi": ["bài thi", "kiểm tra cuối kỳ", "khảo thí"],
+            "học liệu": ["bài giảng", "tài liệu học tập", "giáo trình"],
+            "slide": ["slides", "bài trình chiếu"],
+        },
+    }
+    return {**default, **policy_value(db, "search_strategy", {})}
+
+
+def rewrite_query(question: str) -> str:
+    cleaned = re.sub(r"\s+", " ", question.strip())
+    replacements = {
+        "tai lieu": "tài liệu",
+        "de thi": "đề thi",
+        "du lieu": "dữ liệu",
+        "tri tue nhan tao": "trí tuệ nhân tạo",
+        "cong nghe thong tin": "công nghệ thông tin",
+        "rag pipeline": "RAG pipeline",
+    }
+    folded = strip_accents(cleaned).casefold()
+    for source, target in replacements.items():
+        if source in folded and target.casefold() not in cleaned.casefold():
+            cleaned = f"{cleaned} {target}"
+    return cleaned
+
+
+def expanded_query_terms(query: str, config: dict) -> list[str]:
+    terms = {query}
+    folded = strip_accents(query).casefold()
+    for key, values in config.get("synonyms", {}).items():
+        key_folded = strip_accents(str(key)).casefold()
+        if key_folded in folded:
+            terms.add(str(key))
+            terms.update(str(item) for item in values)
+        elif any(strip_accents(str(item)).casefold() in folded for item in values):
+            terms.add(str(key))
+            terms.update(str(item) for item in values)
+    return [item for item in terms if item.strip()]
+
+
+def query_words(queries: list[str]) -> set[str]:
+    words: set[str] = set()
+    for query in queries:
+        for source in (query.casefold(), strip_accents(query).casefold()):
+            words.update(word for word in re.findall(r"\w+", source, re.UNICODE) if len(word) > 2)
+    return words
+
+
+def classify_query_intent(question: str) -> dict:
+    folded = strip_accents(question).casefold()
+    if any(token in folded for token in ("tao mau", "tao bieu mau", "soan", "template")):
+        label = "create_document"
+    elif any(token in folded for token in ("tim tai lieu", "mo tai lieu", "van ban", "file", "pdf", "docx")):
+        label = "document_lookup"
+    elif any(token in folded for token in ("chu de", "noi ve", "lien quan", "tong hop")):
+        label = "topic_search"
+    else:
+        label = "question_answer"
+    return {"label": label, "confidence": 0.9 if label != "question_answer" else 0.75}
+
+
+def decompose_query(query: str, config: dict) -> list[str]:
+    if len(query) < int(config.get("decompose_min_chars", 120)) and query.count("?") <= 1:
+        return [query]
+    parts = [
+        part.strip(" .?;:")
+        for part in re.split(r"\?|;|\b(?:và|dong thoi|đồng thời|kèm theo)\b", query, flags=re.IGNORECASE)
+        if len(part.strip()) >= 8
+    ]
+    return parts[:4] or [query]
+
+
+def metadata_matches(document: dict, filters: dict | None) -> bool:
+    if not filters:
+        return True
+    mapping = {
+        "faculty": "folder_path",
+        "department": "folder_path",
+        "doc_type": "doc_type",
+        "document_type": "document_type",
+        "status": "status",
+        "author": "owner_code",
+        "owner_code": "owner_code",
+        "visibility": "visibility",
+    }
+    for key, column in mapping.items():
+        value = filters.get(key)
+        if value in (None, ""):
+            continue
+        source = str(document.get(column) or "")
+        if strip_accents(str(value)).casefold() not in strip_accents(source).casefold():
+            return False
+    year = filters.get("year")
+    if year and not str(document.get("created_at", "")).startswith(str(year)):
+        return False
+    return True
+
+
+def rerank_score(base_score: float, words: set[str], document: dict, content: str, config: dict) -> float:
+    title = strip_accents(f"{document['title']} {document['topic']} {document['doc_type']}").casefold()
+    title_hits = sum(1 for word in words if word in title)
+    snippet_bonus = min(2.0, meaningful_text_score(content[:1200]) / 500)
+    freshness = 0.15 if document.get("updated_at") else 0.0
+    return base_score + title_hits * float(config.get("title_boost", 3.0)) + snippet_bonus + freshness
+
+
+def citation_for(score: float, document: dict, content: str) -> dict:
+    snippet = re.sub(r"\s+", " ", content.strip())[:420]
+    return {
+        "id": document["id"],
+        "title": document["title"],
+        "topic": document["topic"],
+        "version": document["current_version"],
+        "visibility": document["visibility"],
+        "score": round(float(score), 4),
+        "chunk": snippet,
+    }
+
+
+def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
     allowed = {document["id"]: document for document in rag_documents(db, user)}
-    intent = _query_intent(question)
+    config = search_policy(db)
+    rewritten_query = rewrite_query(question)
+    sub_queries = decompose_query(rewritten_query, config)
+    expanded_terms = expanded_query_terms(" ".join(sub_queries), config)
+    intent = {**_query_intent(rewritten_query), **classify_query_intent(rewritten_query)}
     query_vectors: dict[str, list[float]] = {}
-    words = {word for word in re.findall(r"\w+", question.casefold(), re.UNICODE) if len(word) > 2}
+    words = query_words(expanded_terms + sub_queries)
+    filtered_allowed = {
+        document_id: document for document_id, document in allowed.items()
+        if metadata_matches(document, filters)
+    }
     vector_matches = []
     for chunk in db.execute("SELECT * FROM chunks").fetchall():
-        document = allowed.get(chunk["document_id"])
+        document = filtered_allowed.get(chunk["document_id"])
         if not document:
             continue
         provider = chunk["provider"]
         if provider not in query_vectors:
-            query_vectors[provider] = ai_provider.embed(question, force_local=provider == "local")
+            query_vectors[provider] = ai_provider.embed(" ".join(expanded_terms), force_local=provider == "local")
         query_vector = query_vectors[provider]
         vector = json.loads(chunk["vector"])
         similarity = sum(a * b for a, b in zip(query_vector, vector))
         lexical = lexical_score(words, document, chunk["content"])
-        vector_matches.append((similarity + lexical, document, chunk["content"]))
+        hybrid = similarity * float(config.get("vector_weight", 0.38)) + lexical * float(config.get("lexical_weight", 0.62))
+        vector_matches.append((hybrid, document, chunk["content"]))
     vector_matches = merge_ranked_matches([item for item in vector_matches if item[0] > 0])
     scored = []
-    for document in allowed.values():
+    for document in filtered_allowed.values():
         content = content_for(db, document)
         score = lexical_score(words, document, content)
         if score:
             scored.append((score, document, content))
     scored = merge_ranked_matches(scored)
-    candidates = merge_ranked_matches(vector_matches + scored)
+    candidates = merge_ranked_matches(vector_matches + scored)[: int(config.get("top_k", 8))]
+    candidates = [
+        (rerank_score(score, words, document, content, config), document, content)
+        for score, document, content in candidates
+    ]
+    candidates = merge_ranked_matches(candidates)[: int(config.get("rerank_k", 5))]
     filtered = [(score, document, content) for score, document, content in candidates if _matches_query_intent(document, content, intent)]
     if filtered:
         top_score = filtered[0][0]
-        threshold = max(1.0, top_score * 0.35)
+        threshold = max(float(config.get("confidence_threshold", 1.0)), top_score * 0.35)
         matches = [item for item in filtered if item[0] >= threshold][:3]
     elif intent["wants_books"] or intent["wants_exam"] or intent["wants_ai"]:
         matches = []
     else:
         matches = scored[:3]
-    audit(db, user["code"], "rag.ask", "query", None, {"question": question, "matches": len(matches), "scope": "public_or_owned"})
+    trace = {
+        "original_query": question,
+        "rewritten_query": rewritten_query,
+        "expanded_terms": expanded_terms,
+        "sub_queries": sub_queries,
+        "intent": intent,
+        "filters": filters or {},
+        "retrieved": [{"id": document["id"], "score": round(float(score), 4), "title": document["title"]} for score, document, _ in candidates],
+        "reranked": [{"id": document["id"], "score": round(float(score), 4), "title": document["title"]} for score, document, _ in matches],
+    }
+    trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+    db.execute(
+        "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (trace_id, user["code"], question, rewritten_query, intent["label"], json.dumps(trace["retrieved"], ensure_ascii=False), json.dumps(trace["reranked"], ensure_ascii=False), now()),
+    )
+    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": question, "matches": len(matches), "scope": "public_or_owned", "intent": intent["label"]})
     if not matches:
         return {
             "answer": _no_matching_documents_answer(intent),
             "citations": [],
             "scope": "public_or_owned",
+            "intent": intent["label"],
+            "rewritten_query": rewritten_query,
+            "trace_id": trace_id,
+            "trace": trace,
+            "verification": {"status": "insufficient_evidence", "message": "Không đủ căn cứ từ tài liệu được phép truy cập."},
         }
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
     answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, prompts.get("answer_instructions"))
     answer = ensure_conversational_format(answer, question)
+    top_score = matches[0][0] if matches else 0
+    verification = {
+        "status": "grounded" if top_score >= float(config.get("confidence_threshold", 1.0)) else "weak_evidence",
+        "message": "Câu trả lời có nguồn tham chiếu." if matches else "Không đủ căn cứ.",
+    }
     return {
         "answer": answer,
-        "citations": [{"id": d["id"], "title": d["title"], "topic": d["topic"], "version": d["current_version"], "visibility": d["visibility"]} for _, d, _ in matches],
+        "citations": [citation_for(score, d, content) for score, d, content in matches],
         "scope": "public_or_owned",
-        "pipeline": ["parse", "chunk", "embed", "vector_store", "permission_filter", "retrieve", "answer"],
+        "intent": intent["label"],
+        "rewritten_query": rewritten_query,
+        "trace_id": trace_id,
+        "trace": trace,
+        "verification": verification,
+        "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "compress", "ground", "cite", "verify"],
     }
 
 
@@ -1574,9 +1758,21 @@ def usage_report(db) -> dict:
     action_events = rows(db.execute(
         "SELECT action,actor_code,created_at FROM audit_logs ORDER BY id DESC LIMIT 100"
     ).fetchall())
+    popular_queries = rows(db.execute(
+        "SELECT rewritten_query query,COUNT(*) count FROM query_traces GROUP BY rewritten_query ORDER BY count DESC LIMIT 10"
+    ).fetchall())
+    zero_result_queries = rows(db.execute(
+        "SELECT original_query,created_at FROM query_traces WHERE citations_json='[]' ORDER BY created_at DESC LIMIT 20"
+    ).fetchall())
+    bad_feedback = rows(db.execute(
+        "SELECT rating,reason,detail,created_at FROM search_feedback WHERE rating<>'up' ORDER BY created_at DESC LIMIT 20"
+    ).fetchall())
     return {
         "actions": actions,
         "action_events": action_events,
+        "popular_queries": popular_queries,
+        "zero_result_queries": zero_result_queries,
+        "bad_feedback": bad_feedback,
         "documents": db.execute("SELECT COUNT(*) count FROM documents").fetchone()["count"],
         "users": db.execute("SELECT COUNT(*) count FROM users WHERE active=1").fetchone()["count"],
         "queries": db.execute("SELECT COUNT(*) count FROM audit_logs WHERE action='rag.ask'").fetchone()["count"],

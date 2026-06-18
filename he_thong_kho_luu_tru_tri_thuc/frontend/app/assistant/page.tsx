@@ -2,19 +2,21 @@
 
 import Link from "next/link";
 import { Fragment, ReactNode, useEffect, useRef, useState } from "react";
-import { Bot, ChevronDown, Download, ExternalLink, FileText, LoaderCircle, MessageSquare, Plus, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, ChevronDown, Download, ExternalLink, FileText, Flag, LoaderCircle, MessageSquare, Plus, Send, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { API_URL } from "@/lib/api";
 import { PageHeader, Panel } from "@/components/ui";
 
-type Citation = { id: string; title: string; topic: string; version: number; visibility: string };
-type Answer = { answer: string; citations: Citation[]; scope: string };
-type MessageItem = { question: string; result: Answer; status?: string; streaming?: boolean };
+type Citation = { id: string; title: string; topic: string; version: number; visibility: string; chunk?: string; score?: number };
+type Verification = { status: string; message: string };
+type Answer = { answer: string; citations: Citation[]; scope: string; trace_id?: string; intent?: string; rewritten_query?: string; verification?: Verification };
+type FeedbackRating = "up" | "wrong_source" | "missing_document";
+type MessageItem = { question: string; result: Answer; status?: string; streaming?: boolean; feedback?: FeedbackRating };
 type Conversation = { id: string; title: string; messages: MessageItem[]; updatedAt: number };
 type StreamEvent =
   | { type: "status"; message: string }
   | { type: "delta"; text: string }
-  | { type: "complete"; citations: Citation[]; scope: string }
+  | { type: "complete"; citations: Citation[]; scope: string; trace_id?: string; intent?: string; rewritten_query?: string; verification?: Verification }
   | { type: "error"; message: string };
 
 const STORAGE_KEY = "eduvault_conversations";
@@ -134,6 +136,43 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: 
   );
 }
 
+function FeedbackControls({
+  value,
+  disabled,
+  onSend,
+}: {
+  value?: FeedbackRating;
+  disabled?: boolean;
+  onSend: (rating: FeedbackRating) => void;
+}) {
+  const options: { rating: FeedbackRating; label: string; icon: ReactNode }[] = [
+    { rating: "up", label: "Hữu ích", icon: <ThumbsUp size={12}/> },
+    { rating: "wrong_source", label: "Sai nguồn", icon: <ThumbsDown size={12}/> },
+    { rating: "missing_document", label: "Thiếu tài liệu", icon: <Flag size={12}/> },
+  ];
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-3">
+      <span className="text-[11px] font-semibold text-[var(--muted)]">Phản hồi</span>
+      {options.map(item => (
+        <button
+          key={item.rating}
+          type="button"
+          disabled={disabled || !!value}
+          onClick={() => onSend(item.rating)}
+          className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-colors ${
+            value === item.rating
+              ? "border-blue-200 bg-blue-50 text-blue-700"
+              : "border-[var(--border)] bg-[var(--card)] text-[var(--muted)] hover:border-blue-200 hover:text-blue-600"
+          } disabled:cursor-default disabled:opacity-70`}
+        >
+          {item.icon}
+          {value === item.rating ? "Đã ghi nhận" : item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function Assistant() {
   const { token, user } = useAuth();
   const [question, setQuestion] = useState("");
@@ -212,6 +251,32 @@ export default function Assistant() {
     });
   }
 
+  async function sendFeedback(messageIndex: number, rating: FeedbackRating) {
+    const item = messages[messageIndex];
+    if (!item?.result.trace_id || item.feedback || !token) return;
+    const reasonByRating: Record<FeedbackRating, string> = {
+      up: "helpful",
+      wrong_source: "wrong_source",
+      missing_document: "missing_document",
+    };
+    try {
+      const response = await fetch(`${API_URL}/api/search/feedback`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trace_id: item.result.trace_id,
+          rating,
+          reason: reasonByRating[rating],
+          detail: item.question,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      updateMessage(activeId, messageIndex, m => ({ ...m, feedback: rating }));
+    } catch {
+      setError("Không thể ghi nhận phản hồi lúc này.");
+    }
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const q = question.trim();
@@ -270,7 +335,15 @@ export default function Assistant() {
           } else if (ev.type === "complete") {
             updateMessage(targetId, msgIndex, m => ({
               ...m, streaming: false, status: "",
-              result: { ...m.result, citations: ev.citations, scope: ev.scope },
+              result: {
+                ...m.result,
+                citations: ev.citations,
+                scope: ev.scope,
+                trace_id: ev.trace_id,
+                intent: ev.intent,
+                rewritten_query: ev.rewritten_query,
+                verification: ev.verification,
+              },
             }));
           } else if (ev.type === "error") {
             throw new Error(ev.message);
@@ -355,6 +428,9 @@ export default function Assistant() {
                       : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>
                     }
                     {!item.streaming && <Sources citations={item.result.citations} onPreview={openPreview}/>}
+                    {!item.streaming && item.result.trace_id && (
+                      <FeedbackControls value={item.feedback} onSend={rating => sendFeedback(index, rating)}/>
+                    )}
                   </div>
                 </div>
               ))}

@@ -431,6 +431,17 @@ CREATE TABLE IF NOT EXISTS document_processing_jobs (
   created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, error_message TEXT,
   FOREIGN KEY(document_id) REFERENCES documents(id)
 );
+CREATE TABLE IF NOT EXISTS query_traces (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, original_query TEXT NOT NULL,
+  rewritten_query TEXT NOT NULL, intent TEXT NOT NULL, retrieved_json TEXT NOT NULL,
+  citations_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS search_feedback (
+  id TEXT PRIMARY KEY, trace_id TEXT, user_code TEXT NOT NULL, rating TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 """
 
 MYSQL_SCHEMA = """
@@ -562,6 +573,18 @@ CREATE TABLE IF NOT EXISTS document_processing_jobs (
   created_at VARCHAR(40) NOT NULL, started_at VARCHAR(40), completed_at VARCHAR(40), error_message TEXT,
   INDEX idx_processing_jobs_document(document_id), FOREIGN KEY(document_id) REFERENCES documents(id)
 ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS query_traces (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, original_query TEXT NOT NULL,
+  rewritten_query TEXT NOT NULL, intent VARCHAR(80) NOT NULL, retrieved_json LONGTEXT NOT NULL,
+  citations_json LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL,
+  INDEX idx_query_traces_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS search_feedback (
+  id VARCHAR(64) PRIMARY KEY, trace_id VARCHAR(64), user_code VARCHAR(30) NOT NULL, rating VARCHAR(30) NOT NULL,
+  reason VARCHAR(80) NOT NULL DEFAULT '', detail TEXT NOT NULL, created_at VARCHAR(40) NOT NULL,
+  INDEX idx_search_feedback_trace(trace_id), INDEX idx_search_feedback_user(user_code),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
 """
 
 
@@ -653,6 +676,18 @@ def init_database() -> None:
             }, ensure_ascii=False), now()),
         )
         db.execute(
+            "INSERT OR IGNORE INTO policies VALUES ('search_strategy', ?, ?)",
+            (json.dumps({
+                "lexical_weight": 0.62,
+                "vector_weight": 0.38,
+                "title_boost": 3.0,
+                "top_k": 8,
+                "rerank_k": 5,
+                "confidence_threshold": 1.0,
+                "decompose_min_chars": 120,
+            }, ensure_ascii=False), now()),
+        )
+        db.execute(
             "INSERT OR IGNORE INTO courses VALUES ('AI101','Trí tuệ nhân tạo',?)",
             (json.dumps(["Đề cương", "Học liệu", "Ngân hàng câu hỏi"], ensure_ascii=False),),
         )
@@ -710,6 +745,7 @@ SNAPSHOT_TABLES = [
     "oauth_states", "cloud_sync_logs",
     "document_v2_state", "object_refs", "outbox_events", "upload_tasks", "document_classification_tickets", "document_processing_jobs",
     "policy_files", "folder_nodes", "specializations", "lecturer_specializations", "lecturer_folder_nodes",
+    "query_traces", "search_feedback",
 ]
 
 

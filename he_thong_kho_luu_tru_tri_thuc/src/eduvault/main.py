@@ -22,7 +22,7 @@ from .database import DATA_DIR, ROOT, connection, database_backend, hash_secret,
 from .infrastructure import infrastructure_status
 from .services import (
     anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup, delete_policy_file,
-    DOCUMENT_TYPES, active_course_suggestions, active_policy, create_document, create_policy_file, enqueue_processing_jobs, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
+    DOCUMENT_TYPES, STANDARD_FOLDERS, active_course_suggestions, active_policy, create_document, create_policy_file, enqueue_processing_jobs, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
     list_deleted_documents, list_documents, list_policy_files, master_tree, permanently_delete_document,
     build_lecturer_folder_tree, profile_specializations, public_specializations, quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
     extraction_placeholder, meaningful_text_score, quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
@@ -80,6 +80,14 @@ class AnalyzeInput(BaseModel):
 
 class Question(BaseModel):
     question: str = Field(min_length=2, max_length=1000)
+    filters: dict | None = None
+
+
+class SearchFeedbackInput(BaseModel):
+    trace_id: str | None = None
+    rating: Literal["up", "down", "wrong_source", "not_relevant", "missing_document"]
+    reason: str = Field(default="", max_length=80)
+    detail: str = Field(default="", max_length=1000)
 
 
 class TransferInput(BaseModel):
@@ -1006,8 +1014,6 @@ def analyze_upload(task_id: str, user: dict = Depends(current_user)):
 
 @app.post("/api/uploads/{task_id}/confirm", status_code=201)
 def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
-    if payload.document_type not in DOCUMENT_TYPES:
-        raise HTTPException(422, "Loai tai lieu khong hop le.")
     with transaction() as db:
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
@@ -1031,9 +1037,11 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         selected_node = validate_folder_access(db, user, payload.folder_node_id) if payload.folder_node_id else None
         if selected_node and selected_node["type"] in {"faculty", "specialization", "course"}:
             raise HTTPException(400, "Document must be saved inside a document-type folder.")
-        if selected_node and selected_node["type"] == "standard_folder":
+        if selected_node and selected_node["type"] in {"standard_folder", "folder", "document_type_folder"}:
             final_document_type = selected_node["name"]
             final_course_id = selected_node["parent_id"]
+        elif final_document_type not in {*DOCUMENT_TYPES, *STANDARD_FOLDERS}:
+            raise HTTPException(422, "Loai tai lieu khong hop le.")
         selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
         if selected_course:
             spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
@@ -1385,7 +1393,7 @@ def rollback(document_id: str, version_no: int, user: dict = Depends(current_use
 @app.post("/api/search")
 def search(payload: Question, user: dict = Depends(current_user)):
     with transaction() as db:
-        return ask(db, user, payload.question)
+        return ask(db, user, payload.question, payload.filters)
 
 
 @app.post("/api/search/stream")
@@ -1394,7 +1402,7 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
         yield json.dumps({"type": "status", "message": "Đang tìm trong kho tri thức..."}, ensure_ascii=False) + "\n"
         try:
             with transaction() as db:
-                result = ask(db, user, payload.question)
+                result = ask(db, user, payload.question, payload.filters)
         except Exception as exc:
             yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
             return
@@ -1408,6 +1416,10 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
                 "citations": result["citations"],
                 "scope": result["scope"],
                 "pipeline": result.get("pipeline", []),
+                "trace_id": result.get("trace_id"),
+                "intent": result.get("intent"),
+                "rewritten_query": result.get("rewritten_query"),
+                "verification": result.get("verification"),
             },
             ensure_ascii=False,
         ) + "\n"
@@ -1417,6 +1429,22 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/search/feedback", status_code=201)
+def search_feedback(payload: SearchFeedbackInput, user: dict = Depends(current_user)):
+    feedback_id = f"fb-{secrets.token_hex(6)}"
+    with transaction() as db:
+        db.execute(
+            "INSERT INTO search_feedback(id,trace_id,user_code,rating,reason,detail,created_at) VALUES(?,?,?,?,?,?,?)",
+            (feedback_id, payload.trace_id, user["code"], payload.rating, payload.reason, payload.detail, now()),
+        )
+        audit(db, user["code"], "rag.feedback", "query", payload.trace_id, {
+            "feedback_id": feedback_id,
+            "rating": payload.rating,
+            "reason": payload.reason,
+        })
+    return {"id": feedback_id, "status": "received"}
 
 
 @app.get("/api/trash")

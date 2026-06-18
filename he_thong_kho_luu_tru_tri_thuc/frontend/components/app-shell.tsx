@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bell, BookOpenCheck, Bot, ChartNoAxesCombined, CheckCircle2, ClipboardCheck, DatabaseBackup, FileClock, FilePlus2, FolderKanban, GraduationCap, KeyRound, LoaderCircle, LogOut, Menu, Moon, RefreshCw, ScrollText, Search, Settings, Sun, Trash2, UploadCloud, UserCog, Users, X, XCircle } from "lucide-react";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { LoginScreen } from "@/components/login-screen";
@@ -51,12 +51,22 @@ function formatUploadBytes(bytes: number) {
 function UploadNotificationMenu() {
   const { tasks, retryUpload, removeTask } = useUploadTasks();
   const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const activeCount = tasks.filter(task => !["completed", "failed"].includes(task.status)).length;
   const failedCount = tasks.filter(task => task.status === "failed").length;
   const badgeCount = activeCount || failedCount;
 
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
   return (
-    <div className="relative">
+    <div className="relative" ref={menuRef}>
       <button className="icon-btn relative" aria-label="Thông báo" aria-expanded={open} onClick={() => setOpen(value => !value)}>
         <Bell size={17}/>
         {badgeCount > 0 && <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white">{badgeCount}</span>}
@@ -65,10 +75,10 @@ function UploadNotificationMenu() {
         <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-3">
           <UploadCloud className="text-blue-600" size={17}/>
           <div>
-            <strong className="block text-sm">Thông báo</strong>
+            <strong className="block text-sm">Thông báo tải lên</strong>
             <span className="muted text-[10px]">Theo dõi upload và xử lý tài liệu</span>
           </div>
-          <span className="badge badge-blue ml-auto">{activeCount} đang chạy</span>
+          {activeCount > 0 && <span className="badge badge-blue ml-auto">{activeCount} đang chạy</span>}
         </div>
         <div className="max-h-[min(68vh,520px)] space-y-2 overflow-y-auto p-3">
           {!tasks.length && <p className="muted p-3 text-center text-xs">Chưa có thông báo upload. Bạn có thể tiếp tục làm việc khi file đang được xử lý.</p>}
