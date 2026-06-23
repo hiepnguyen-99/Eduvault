@@ -26,6 +26,8 @@ const icons = {
   profile: UserCog,
   handover: GraduationCap,
   summary: BookOpenCheck,
+  search: Search,
+  trash: Trash2,
 };
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -118,7 +120,6 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const { user, ready, logout } = useAuth();
   const [dark, setDark] = useState(false);
   const [mobile, setMobile] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -150,11 +151,6 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
           return <Link key={`${item.permission}:${item.href}`} href={item.href} onClick={()=>setMobile(false)} className={`flex h-12 w-full items-center gap-3 rounded-xl px-3 text-[13px] font-semibold transition-colors duration-150 ${active ? "bg-blue-500 text-white shadow-lg shadow-blue-950/20" : "bg-transparent text-blue-100/75 hover:bg-white/10 hover:text-white"}`}><Icon className="shrink-0" size={18}/><span className="truncate whitespace-nowrap">{item.label}</span></Link>
         })}
       </nav>
-      <div className="m-3 rounded-xl border border-white/10 bg-white/5 p-3">
-        <div className="flex justify-between text-xs font-bold"><span>Dung lượng demo V2</span><span>100 GB</span></div>
-        <div className="mt-2 h-1.5 rounded-full bg-white/10"><div className="h-full w-[12%] rounded-full bg-blue-400"/></div>
-        <p className="mt-2 text-[10px] text-blue-100/60">MySQL metadata · MinIO file gốc</p>
-      </div>
     </aside>
   );
 
@@ -165,14 +161,13 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
       <div className="main-offset ml-[304px]">
         <header className="sticky top-0 z-20 h-[72px] bg-[color:var(--card)]/92 backdrop-blur border-b border-[var(--border)] px-4 md:px-7 flex items-center gap-3">
           <button className="icon-btn sidebar-toggle" aria-label="Mở menu" onClick={()=>setMobile(true)}><Menu size={18}/></button>
-          <button onClick={()=>setSearchOpen(true)} className="h-10 max-w-xl flex-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 flex items-center gap-2 text-left text-sm text-[var(--muted)]"><Search size={17}/><span className="truncate">Tìm tài liệu, học phần, giảng viên...</span><kbd className="ml-auto hidden sm:block rounded border border-[var(--border)] bg-[var(--card)] px-1.5 py-0.5 text-[10px]">⌘ K</kbd></button>
+          <Link href="/search" className="h-10 max-w-xl flex-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 flex items-center gap-2 text-left text-sm text-[var(--muted)] hover:border-blue-300 hover:text-blue-700"><Search size={17}/><span className="truncate">Tim kiem tri thuc toan he thong</span></Link>
           <button className="icon-btn" aria-label="Đổi giao diện" onClick={()=>setDark(!dark)}>{dark?<Sun size={17}/>:<Moon size={17}/>}</button>
           <UploadNotificationMenu />
           <div className="hidden sm:flex items-center gap-2 border-l border-[var(--border)] pl-3"><div className="h-9 w-9 rounded-full bg-gradient-to-br from-blue-600 to-indigo-800 text-white grid place-items-center text-xs font-bold">{user.code.slice(0,2)}</div><div><strong className="block text-xs">{user.name}</strong><span className="muted text-[10px]">{ROLE_LABELS[appRole]} · {user.code}</span></div><button className="icon-btn ml-1" aria-label="Đăng xuất" onClick={logout}><LogOut size={15}/></button></div>
         </header>
         <main className="p-4 md:p-7 max-w-[1680px] mx-auto">{children}</main>
       </div>
-      {searchOpen && <div className="fixed inset-0 z-[70] bg-slate-950/55 p-4 flex items-start justify-center pt-[12vh]" onClick={()=>setSearchOpen(false)}><div className="app-card w-full max-w-2xl overflow-hidden" onClick={e=>e.stopPropagation()}><div className="p-4 flex gap-3 border-b border-[var(--border)]"><Search className="muted"/><input autoFocus className="w-full bg-transparent outline-none text-sm" placeholder="Tìm kiếm trong toàn bộ kho tri thức..."/><button onClick={()=>setSearchOpen(false)}><X size={18}/></button></div><div className="p-4"><p className="eyebrow mb-3">Gợi ý nhanh</p>{["Đề cương Trí tuệ nhân tạo","Quy trình xây dựng đề thi","Giảng viên Nguyễn Minh Anh"].map(x=><div key={x} className="rounded-lg px-3 py-2.5 hover:bg-[var(--soft)] text-sm flex gap-3"><Search size={15} className="muted"/>{x}</div>)}</div></div></div>}
     </div>
   );
 }

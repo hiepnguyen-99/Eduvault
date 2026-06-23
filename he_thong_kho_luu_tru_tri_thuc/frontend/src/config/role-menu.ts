@@ -26,7 +26,25 @@ export type MenuItem = {
   label: string;
   href: string;
   permission: Permission;
-  icon: "dashboard" | "repository" | "upload" | "policy" | "users" | "permissions" | "backup" | "reports" | "audit" | "transfer" | "quality" | "versions" | "chatbot" | "profile" | "handover" | "summary";
+  icon:
+    | "dashboard"
+    | "repository"
+    | "upload"
+    | "policy"
+    | "users"
+    | "permissions"
+    | "backup"
+    | "reports"
+    | "audit"
+    | "transfer"
+    | "quality"
+    | "versions"
+    | "chatbot"
+    | "profile"
+    | "handover"
+    | "summary"
+    | "search"
+    | "trash";
 };
 
 export const ROLE_LABELS: Record<AppRole, string> = {
@@ -54,10 +72,12 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
     "cloud.sync",
     "reports.view",
     "audit.view",
+    "transfer.manage",
   ],
   HEAD_OF_DEPARTMENT: [
     "dashboard.view",
     "repository.view",
+    "policy.manage",
     "cloud.sync",
     "transfer.manage",
     "quality.view",
@@ -84,45 +104,54 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
 
 export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   ADMIN: [
+    { label: "Vận hành", href: "/operations", permission: "audit.view", icon: "audit" },
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
-    { label: "Kho tài liệu", href: "/repository", permission: "repository.view", icon: "repository" },
-    { label: "Policy", href: "/policy", permission: "policy.manage", icon: "policy" },
+    { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
+    { label: "Kho tri thức", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Quản trị tri thức", href: "/policy", permission: "policy.manage", icon: "policy" },
+    { label: "Quy tắc quản trị", href: "/governance-rules", permission: "policy.manage", icon: "policy" },
     { label: "Người dùng", href: "/users", permission: "users.manage", icon: "users" },
     { label: "Phân quyền", href: "/permissions", permission: "permissions.manage", icon: "permissions" },
     { label: "Sao lưu", href: "/backup", permission: "backup.manage", icon: "backup" },
     { label: "Báo cáo", href: "/reports", permission: "reports.view", icon: "reports" },
-    { label: "Nhật ký", href: "/audit-logs", permission: "audit.view", icon: "audit" },
+    { label: "Nhật ký hệ thống", href: "/audit-logs", permission: "audit.view", icon: "audit" },
   ],
   HEAD_OF_DEPARTMENT: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
-    { label: "Kho tài liệu", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
+    { label: "Kho tri thức", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Quản trị tri thức", href: "/policy", permission: "policy.manage", icon: "policy" },
+    { label: "Quy tắc quản trị", href: "/governance-rules", permission: "policy.manage", icon: "policy" },
     { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
-    { label: "Chuyển giao", href: "/knowledge-transfer", permission: "transfer.manage", icon: "transfer" },
-    { label: "Theo dõi chất lượng", href: "/reports", permission: "quality.view", icon: "quality" },
+    { label: "Chuyển giao tri thức", href: "/knowledge-transfer", permission: "transfer.manage", icon: "transfer" },
     { label: "Báo cáo", href: "/reports", permission: "reports.view", icon: "reports" },
   ],
   LECTURER: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
-    { label: "Kho của tôi", href: "/repository", permission: "repository.own", icon: "repository" },
+    { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
+    { label: "Kho tri thức", href: "/repository", permission: "repository.own", icon: "repository" },
     { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
-    { label: "Lịch sử phiên bản", href: "/versions", permission: "versions.view", icon: "versions" },
-    { label: "Chatbot", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
+    { label: "Phiên bản", href: "/versions", permission: "versions.view", icon: "versions" },
+    { label: "Trợ lý AI", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
     { label: "Hồ sơ", href: "/profile", permission: "profile.manage", icon: "profile" },
   ],
   NEW_LECTURER: [
     { label: "Tổng quan", href: "/", permission: "dashboard.view", icon: "dashboard" },
-    { label: "Kho bàn giao", href: "/knowledge-transfer", permission: "handover.view", icon: "handover" },
+    { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
+    { label: "Chuyển giao tri thức", href: "/knowledge-transfer", permission: "handover.view", icon: "handover" },
     { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
-    { label: "Tóm tắt tri thức", href: "/knowledge-transfer", permission: "knowledge.summary", icon: "summary" },
-    { label: "Chatbot", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
+    { label: "Trợ lý AI", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
     { label: "Hồ sơ", href: "/profile", permission: "profile.manage", icon: "profile" },
   ],
 };
 
 export const ROUTE_PERMISSIONS: Array<{ pattern: RegExp; permission: Permission }> = [
   { pattern: /^\/$/, permission: "dashboard.view" },
+  { pattern: /^\/search(?:\/.*)?$/, permission: "dashboard.view" },
   { pattern: /^\/repository(?:\/.*)?$/, permission: "repository.view" },
   { pattern: /^\/repository(?:\/.*)?$/, permission: "repository.own" },
+  { pattern: /^\/trash(?:\/.*)?$/, permission: "repository.view" },
+  { pattern: /^\/trash(?:\/.*)?$/, permission: "repository.own" },
   { pattern: /^\/documents(?:\/.*)?$/, permission: "repository.view" },
   { pattern: /^\/documents(?:\/.*)?$/, permission: "repository.own" },
   { pattern: /^\/assistant(?:\/.*)?$/, permission: "chatbot.use" },
@@ -138,9 +167,11 @@ export const ROUTE_PERMISSIONS: Array<{ pattern: RegExp; permission: Permission 
   { pattern: /^\/settings(?:\/.*)?$/, permission: "policy.manage" },
   { pattern: /^\/settings(?:\/.*)?$/, permission: "profile.manage" },
   { pattern: /^\/policy(?:\/.*)?$/, permission: "policy.manage" },
+  { pattern: /^\/governance-rules(?:\/.*)?$/, permission: "policy.manage" },
   { pattern: /^\/profile(?:\/.*)?$/, permission: "profile.manage" },
   { pattern: /^\/users(?:\/.*)?$/, permission: "users.manage" },
   { pattern: /^\/audit-logs(?:\/.*)?$/, permission: "audit.view" },
+  { pattern: /^\/operations(?:\/.*)?$/, permission: "audit.view" },
 ];
 
 export function toAppRole(role: BackendRole): AppRole {

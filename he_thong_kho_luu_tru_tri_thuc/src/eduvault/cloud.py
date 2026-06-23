@@ -12,7 +12,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from .database import now
+from .database import now, required_secret
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,7 +66,7 @@ def provider_status(provider: str) -> dict:
 
 
 def _cipher() -> Fernet:
-    secret = os.getenv("TOKEN_ENCRYPTION_KEY", "eduvault-demo-key-change-before-production")
+    secret = required_secret("TOKEN_ENCRYPTION_KEY")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     return Fernet(key)
 

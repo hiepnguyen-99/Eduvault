@@ -148,6 +148,7 @@ export type Audit = {
   action: string;
   resource_type: string;
   resource_id?: string;
+  detail?: Record<string, unknown>;
   created_at: string;
 };
 
