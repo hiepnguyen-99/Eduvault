@@ -843,6 +843,16 @@ def delete_policy_file(db, user: dict, policy_id: str) -> dict:
         raise ValueError("Policy khong ton tai.")
     if policy["status"] == "active":
         raise PermissionError("Không thể xóa policy đang active. Hãy activate policy khác trước.")
+    
+    # Clean up assignments, permissions and audit logs associated with this policy
+    db.execute("DELETE FROM lecturer_folder_permissions WHERE policy_id=?", (policy_id,))
+    db.execute(
+        "DELETE FROM lecturer_assignment_audit_logs WHERE batch_id IN (SELECT id FROM lecturer_assignment_batches WHERE policy_id=?)",
+        (policy_id,),
+    )
+    db.execute("DELETE FROM lecturer_assignments WHERE policy_id=?", (policy_id,))
+    db.execute("DELETE FROM lecturer_assignment_batches WHERE policy_id=?", (policy_id,))
+
     specs = rows(db.execute("SELECT id FROM specializations WHERE policy_id=?", (policy_id,)).fetchall())
     spec_ids = [item["id"] for item in specs]
     if spec_ids:
@@ -858,6 +868,7 @@ def delete_policy_file(db, user: dict, policy_id: str) -> dict:
     db.execute("DELETE FROM policy_files WHERE id=?", (policy_id,))
     audit(db, user["code"], "policy_file.delete", "policy", policy_id, {"title": policy["title"], "status": policy["status"]})
     return {"status": "deleted", "id": policy_id}
+
 
 
 def sync_policy_nodes(db) -> None:
