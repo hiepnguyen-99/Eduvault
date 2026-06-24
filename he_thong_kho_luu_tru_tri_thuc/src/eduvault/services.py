@@ -4410,6 +4410,31 @@ def _build_backup_manifest(db, backup_id: str, user: dict, target: Path, databas
     chunks_count = db.execute("SELECT COUNT(*) count FROM chunks").fetchone()["count"]
     file_assets_count = db.execute("SELECT COUNT(*) count FROM file_assets").fetchone()["count"]
     object_refs_count = db.execute("SELECT COUNT(*) count FROM object_refs").fetchone()["count"]
+    
+    sample_docs = db.execute("SELECT id, title, topic, doc_type, owner_code, current_version, visibility FROM documents WHERE deleted_at IS NULL LIMIT 5").fetchall()
+    sample_documents = [dict(r) for r in sample_docs]
+    
+    sample_f = db.execute("SELECT document_id, version_no, original_name, mime_type, size, created_at FROM file_assets LIMIT 5").fetchall()
+    sample_files = []
+    for r in sample_f:
+        row = dict(r)
+        # Ensure sizes are numbers or strings as expected by frontend
+        sample_files.append({
+            "document_id": row.get("document_id", ""),
+            "version_no": row.get("version_no", 1),
+            "original_name": row.get("original_name", ""),
+            "mime_type": row.get("mime_type", ""),
+            "size": row.get("size", 0),
+            "created_at": row.get("created_at", "")
+        })
+    
+    included_components = [
+        {"key": "database", "label": "Cơ sở dữ liệu", "included": database_file.exists(), "error": None},
+        {"key": "storage", "label": "Kho lưu trữ", "included": (target / "storage").exists(), "error": None},
+        {"key": "qdrant", "label": "Chỉ mục Qdrant", "included": qdrant.get("included", False), "error": qdrant.get("error")},
+        {"key": "minio", "label": "Đối tượng MinIO", "included": minio.get("included", False), "error": minio.get("error")}
+    ]
+    
     manifest = {
         "backup_id": backup_id,
         "created_at": created_at,
@@ -4433,7 +4458,21 @@ def _build_backup_manifest(db, backup_id: str, user: dict, target: Path, databas
         "chunks_count": chunks_count,
         "file_assets_count": file_assets_count,
         "object_refs_count": object_refs_count,
-        "included_components": ["database", "storage", "qdrant", "minio"]
+        "local_storage_size_bytes": local_stats["size_bytes"],
+        "local_storage_files_count": local_stats["files_count"],
+        "qdrant_collections_count": len(qdrant.get("collections", [])) if isinstance(qdrant.get("collections"), list) else 0,
+        "qdrant_vectors_count": qdrant.get("vectors_count", 0),
+        "minio_objects_count": minio.get("objects_count", 0),
+        "minio_size_bytes": minio.get("size_bytes", 0),
+        "included_components": included_components,
+        "sample_documents": sample_documents,
+        "sample_files": sample_files,
+        "restore_scope": {
+            "database": True,
+            "storage": True,
+            "qdrant": qdrant.get("included", False),
+            "minio": minio.get("included", False)
+        }
     }
     return manifest
 
@@ -4485,9 +4524,9 @@ def backup_record_with_manifest(item: dict) -> dict:
         try:
             item["manifest"] = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            item["manifest"] = {}
+            item["manifest"] = None
     else:
-        item["manifest"] = {}
+        item["manifest"] = None
     return item
 
 
@@ -4942,6 +4981,15 @@ def sync_document(db, document_id: str, source: Path, storage_id: str | None = N
         query += " AND id=?"
         params = (storage_id,)
     for storage in db.execute(query, params).fetchall():
+        if storage["provider"] in {"google_drive", "onedrive"}:
+            conn_exists = db.execute(
+                "SELECT 1 FROM cloud_connections WHERE provider=? AND status='connected'",
+                (storage["provider"],)
+            ).fetchone()
+            if not conn_exists:
+                db.execute("UPDATE external_storages SET last_status='failed' WHERE id=?", (storage["id"],))
+                results.append({"storage": storage["name"], "status": "failed", "error": "Provider not connected"})
+                continue
         target_dir = Path(storage["location"]) / document_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / source.name

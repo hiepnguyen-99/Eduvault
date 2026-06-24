@@ -133,7 +133,15 @@ export default function Backup() {
 
     {canViewCompliance && <Panel title="Kho lưu trữ hệ thống đang hoạt động" className="mt-5">
       <div className="grid gap-3 p-5 sm:grid-cols-3">
-        {c.storages.map(x => <div key={x.id} className="rounded-xl border border-[var(--border)] p-4"><Cloud size={20}/><strong className="mt-3 block text-sm">{x.name}</strong><span className="muted text-xs">{x.provider}</span><span className="badge badge-green mt-3"><CheckCircle2 size={11}/>{x.last_status}</span></div>)}
+        {c.storages.map(x => <div key={x.id} className="rounded-xl border border-[var(--border)] p-4">
+          <Cloud size={20}/>
+          <strong className="mt-3 block text-sm">{x.name}</strong>
+          <span className="muted text-xs">{x.provider}</span>
+          <span className={`badge ${x.last_status === "success" || x.last_status === "ready" ? "badge-green" : "badge-amber"} mt-3`}>
+            {x.last_status === "success" || x.last_status === "ready" ? <CheckCircle2 size={11}/> : null}
+            {x.last_status}
+          </span>
+        </div>)}
       </div>
     </Panel>}
 
@@ -147,7 +155,7 @@ export default function Backup() {
 }
 
 function BackupExplorerCard({ backup, canRestore, onRestore }: { backup: BackupType; canRestore: boolean; onRestore: () => void }) {
-  const manifest = backup.manifest;
+  const manifest = backup.manifest && Object.keys(backup.manifest).length > 0 ? backup.manifest : null;
   const qdrantBytes = (manifest?.qdrant?.collections || []).reduce((sum, item) => sum + (item.snapshot_size_bytes || 0), 0);
   const protectedBytes = manifest ? manifest.local_storage_size_bytes + manifest.minio_size_bytes + (manifest.database_snapshot?.size_bytes || 0) + qdrantBytes : 0;
   return (
@@ -164,29 +172,38 @@ function BackupExplorerCard({ backup, canRestore, onRestore }: { backup: BackupT
         </div>
       </div>
 
-      {manifest ? <>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-          <BackupStat label="Tài liệu" value={manifest.documents_count} />
-          <BackupStat label="Phiên bản" value={manifest.versions_count} />
-          <BackupStat label="Tri thức đã lưu" value={manifest.chunks_count} />
-          <BackupStat label="Tệp gốc" value={manifest.file_assets_count} />
-          <BackupStat label="Chỉ mục Qdrant" value={manifest.qdrant_vectors_count} />
-          <BackupStat label="Đối tượng MinIO" value={manifest.minio_objects_count} />
-        </div>
-        <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-          <ComponentList title="Dữ liệu được bảo vệ" items={manifest.included_components.filter(item => item.included)} />
-          <ComponentList title="Cần kiểm tra thêm" items={manifest.included_components.filter(item => !item.included)} muted />
-          <div className="rounded-lg border border-[var(--border)] p-3">
-            <p className="muted text-[11px] font-bold uppercase tracking-wide">Dung lượng được bảo vệ</p>
-            <strong className="mt-1 block text-lg">{formatBytes(protectedBytes)}</strong>
-            <p className="muted mt-1 text-xs">{manifest.local_storage_files_count} tệp trong gói sao lưu</p>
+      {manifest ? (() => {
+        const rawComponents = manifest.included_components || [];
+        const components = rawComponents.map(item => {
+          if (typeof item === "string") {
+            return { key: item, label: item, included: true };
+          }
+          return item;
+        });
+        return <>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+            <BackupStat label="Tài liệu" value={manifest.documents_count || 0} />
+            <BackupStat label="Phiên bản" value={manifest.versions_count || 0} />
+            <BackupStat label="Tri thức đã lưu" value={manifest.chunks_count || 0} />
+            <BackupStat label="Tệp gốc" value={manifest.file_assets_count || 0} />
+            <BackupStat label="Chỉ mục Qdrant" value={manifest.qdrant_vectors_count || 0} />
+            <BackupStat label="Đối tượng MinIO" value={manifest.minio_objects_count || 0} />
           </div>
-        </div>
-        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-          <SampleList title="Ví dụ tài liệu" items={manifest.sample_documents.map(item => `${item.title} · v${item.current_version}`)} />
-          <SampleList title="Ví dụ tệp" items={manifest.sample_files.map(item => `${item.original_name} · ${formatBytes(Number(item.size || 0))}`)} />
-        </div>
-      </> : <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">Bản sao lưu này được tạo trước khi có tóm tắt chi tiết. Có thể khôi phục theo cơ chế cũ, nhưng chưa hiển thị được số tài liệu, phiên bản và checksum.</p>}
+          <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+            <ComponentList title="Dữ liệu được bảo vệ" items={components.filter(item => item.included)} />
+            <ComponentList title="Cần kiểm tra thêm" items={components.filter(item => !item.included)} muted />
+            <div className="rounded-lg border border-[var(--border)] p-3">
+              <p className="muted text-[11px] font-bold uppercase tracking-wide">Dung lượng được bảo vệ</p>
+              <strong className="mt-1 block text-lg">{formatBytes(protectedBytes)}</strong>
+              <p className="muted mt-1 text-xs">{manifest.local_storage_files_count || 0} tệp trong gói sao lưu</p>
+            </div>
+          </div>
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+            <SampleList title="Ví dụ tài liệu" items={(manifest.sample_documents || []).map(item => `${item.title || ""} · v${item.current_version || 1}`)} />
+            <SampleList title="Ví dụ tệp" items={(manifest.sample_files || []).map(item => `${item.original_name || ""} · ${formatBytes(Number(item.size || 0))}`)} />
+          </div>
+        </>;
+      })() : <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">Bản sao lưu này được tạo trước khi có tóm tắt chi tiết. Có thể khôi phục theo cơ chế cũ, nhưng chưa hiển thị được số tài liệu, phiên bản và checksum.</p>}
     </div>
   );
 }
