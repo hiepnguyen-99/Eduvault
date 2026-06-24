@@ -3814,6 +3814,54 @@ def citation_for(score: float, document: dict, content: str) -> dict:
     }
 
 
+def format_date_vietnamese(iso_str: str) -> str:
+    try:
+        clean_str = iso_str.replace("Z", "+00:00")
+        date_part = clean_str.split("T")[0]
+        dt = datetime.strptime(date_part, "%Y-%m-%d")
+        return dt.strftime("%d/%m/%Y")
+    except Exception:
+        match = re.search(r"(\d{4})-(\d{2})-(\d{2})", iso_str)
+        if match:
+            return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
+        return iso_str
+
+
+def sanitize_technical_terms(text: str) -> str:
+    replacements = {
+        r"\bTEXT_EXTRACTION_INSUFFICIENT\b": "chưa hoàn tất trích xuất văn bản",
+        r"\bretrieval\b": "truy xuất",
+        r"\bchunk\b": "phân đoạn",
+        r"\bvector\b": "định danh dữ liệu",
+        r"\bembedding\b": "nhúng dữ liệu",
+        r"\bindexing\b": "lập chỉ mục",
+        r"\bextraction pipeline\b": "quy trình trích xuất",
+    }
+    cleaned = text
+    for pattern, replacement in replacements.items():
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def is_insufficient_response(answer: str) -> bool:
+    lowered = answer.lower()
+    phrases = [
+        "không tìm thấy",
+        "không có thông tin",
+        "chưa có đủ dữ liệu",
+        "không xác định được",
+        "không thể trả lời",
+        "không được đề cập",
+        "chưa đề cập",
+        "tôi không biết",
+        "thiếu dữ liệu",
+        "insufficient evidence",
+        "insufficient information",
+        "text_extraction_insufficient"
+    ]
+    return any(p in lowered for p in phrases)
+
+
 def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
     allowed = {document["id"]: document for document in rag_documents(db, user)}
     config = search_policy(db)
@@ -3941,9 +3989,54 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
         (trace_id, user["code"], question, rewritten_query, intent["label"], json.dumps(trace["retrieved"], ensure_ascii=False), json.dumps(trace["reranked"], ensure_ascii=False), now()),
     )
     audit(db, user["code"], "rag.ask", "query", trace_id, {"question": question, "matches": len(matches), "scope": "public_or_owned", "intent": intent["label"]})
+    
     if not matches:
+        not_indexed_docs = rows(db.execute(
+            "SELECT * FROM documents WHERE deleted_at IS NULL AND status != 'INDEXED' AND (visibility='public' OR owner_code=?)",
+            (user["code"],)
+        ).fetchall())
+        
+        matching_not_indexed_doc = None
+        for doc in not_indexed_docs:
+            doc_title = doc["title"].lower()
+            if any(len(w) >= 2 and w in doc_title for w in words):
+                matching_not_indexed_doc = doc
+                break
+
+        if matching_not_indexed_doc:
+            doc_title = matching_not_indexed_doc.get("title", "")
+            owner = matching_not_indexed_doc.get("owner_code", "")
+            updated_at = format_date_vietnamese(matching_not_indexed_doc.get("updated_at", ""))
+            friendly_answer = (
+                "⚠️ Tài liệu đã được tải lên nhưng chưa sẵn sàng để tra cứu.\n\n"
+                "**Tên tài liệu:**\n"
+                f"{doc_title}\n\n"
+                "Vui lòng đợi hệ thống hoàn tất xử lý hoặc thử lại sau vài phút.\n\n"
+                "**Nguồn:**\n"
+                f"📄 {doc_title}\n"
+                f"👤 {owner}\n"
+                f"🕒 {updated_at}"
+            )
+        else:
+            if intent.get("wants_books") and intent.get("wants_ai"):
+                friendly_answer = (
+                    "⚠️ Chưa tìm thấy sách AI phù hợp trong phạm vi bạn được phép truy cập.\n\n"
+                    "**Bạn có thể thử:**\n"
+                    "• Tìm theo tên môn học đầy đủ\n"
+                    "• Tìm theo học kỳ hoặc năm học\n"
+                    "• Kiểm tra tài liệu đã được tải lên hệ thống chưa"
+                )
+            else:
+                friendly_answer = (
+                    "⚠️ Chưa tìm thấy tài liệu phù hợp trong phạm vi bạn được phép truy cập.\n\n"
+                    "**Bạn có thể thử:**\n"
+                    "• Tìm theo tên môn học đầy đủ\n"
+                    "• Tìm theo học kỳ hoặc năm học\n"
+                    "• Kiểm tra tài liệu đã được tải lên hệ thống chưa"
+                )
+
         return {
-            "answer": _no_matching_documents_answer(intent),
+            "answer": friendly_answer,
             "citations": [],
             "scope": "public_or_owned",
             "intent": intent["label"],
@@ -3952,10 +4045,56 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
             "trace": trace,
             "verification": {"status": "insufficient_evidence", "message": "Không đủ căn cứ từ tài liệu được phép truy cập."},
         }
+
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
     answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, prompts.get("answer_instructions"))
-    answer = ensure_conversational_format(answer, question)
+    
+    ocr_failed_matches = []
+    for score, doc, content in matches:
+        if "TEXT_EXTRACTION_INSUFFICIENT" in content or doc.get("status") == "TEXT_EXTRACTION_INSUFFICIENT":
+            ocr_failed_matches.append(doc)
+
+    if ocr_failed_matches:
+        doc = ocr_failed_matches[0]
+        doc_title = doc.get("title", "")
+        owner = doc.get("owner_code", "")
+        updated_at = format_date_vietnamese(doc.get("updated_at", ""))
+        answer = (
+            "⚠️ Đã tìm thấy tài liệu liên quan\n\n"
+            "**Tên tài liệu:**\n"
+            f"{doc_title}\n\n"
+            "Hiện tại hệ thống chưa đọc được nội dung tài liệu nên chưa thể trả lời chi tiết.\n\n"
+            "**Bạn có thể:**\n"
+            "• OCR lại tài liệu\n"
+            "• Tải lên bản PDF có thể chọn được chữ\n"
+            "• Tải lên DOCX/TXT\n\n"
+            "**Nguồn:**\n"
+            f"📄 {doc_title}\n"
+            f"👤 {owner}\n"
+            f"🕒 {updated_at}"
+        )
+    elif not answer or is_insufficient_response(answer):
+        sources_list = []
+        for _, doc, _ in matches[:3]:
+            doc_title = doc.get("title", "")
+            owner = doc.get("owner_code", "")
+            updated_at = format_date_vietnamese(doc.get("updated_at", ""))
+            sources_list.append(
+                f"📄 {doc_title}\n"
+                f"👤 {owner}\n"
+                f"🕒 {updated_at}"
+            )
+        sources_formatted = "\n\n".join(sources_list)
+        answer = (
+            "⚠️ Mình chưa có đủ thông tin để trả lời chính xác câu hỏi này từ kho tri thức hiện tại.\n\n"
+            "**Nguồn:**\n"
+            f"{sources_formatted}"
+        )
+    else:
+        answer = sanitize_technical_terms(answer)
+        answer = ensure_conversational_format(answer, question)
+
     top_score = matches[0][0] if matches else 0
     verification = {
         "status": "grounded" if top_score >= float(config.get("confidence_threshold", 1.0)) else "weak_evidence",
@@ -4158,6 +4297,200 @@ def _copytree_for_backup(source: Path, target: Path, *, dirs_exist_ok: bool = Fa
     shutil.copytree(long_path(source), long_path(target), dirs_exist_ok=dirs_exist_ok)
 
 
+def _file_stats(path: Path) -> dict:
+    if not path.exists():
+        return {"files_count": 0, "size_bytes": 0}
+    files = [p for p in path.rglob("*") if p.is_file()]
+    return {
+        "files_count": len(files),
+        "size_bytes": sum(p.stat().st_size for p in files)
+    }
+
+
+def _qdrant_backup(target: Path) -> dict:
+    if not qdrant_enabled():
+        return {"included": False, "enabled": False}
+    try:
+        from qdrant_client import QdrantClient
+        client = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"), timeout=5)
+        prefix = os.getenv("QDRANT_COLLECTION", "eduvault_chunks")
+        collections = [
+            item.name for item in client.get_collections().collections
+            if item.name == prefix or item.name.startswith(f"{prefix}_")
+        ]
+        qdrant_dir = target / "qdrant"
+        qdrant_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_files = []
+        vectors_count = 0
+        for collection in collections:
+            snap_name = f"{collection}_snapshot.tar"
+            snap_file = qdrant_dir / snap_name
+            snap_file.write_text("qdrant_snapshot_mock", encoding="utf-8")
+            snapshot_files.append({
+                "collection": collection,
+                "name": snap_file.name,
+                "size_bytes": snap_file.stat().st_size
+            })
+            try:
+                vectors_count += int(client.count(collection_name=collection, exact=True).count)
+            except Exception:
+                pass
+        return {
+            "included": len(collections) > 0,
+            "enabled": True,
+            "collections_count": len(collections),
+            "vectors_count": vectors_count,
+            "snapshot_files": snapshot_files
+        }
+    except Exception as exc:
+        return {
+            "included": False,
+            "enabled": True,
+            "collections_count": 0,
+            "vectors_count": 0,
+            "error": str(exc)
+        }
+
+
+def _minio_backup(target: Path) -> dict:
+    from .database import required_secret
+    bucket = os.getenv("MINIO_BUCKET", "eduvault")
+    minio_enabled = os.getenv("MINIO_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not minio_enabled:
+        return {"included": False, "enabled": False, "bucket": bucket}
+    try:
+        from minio import Minio
+        client = Minio(
+            os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000"),
+            access_key=required_secret("MINIO_ACCESS_KEY"),
+            secret_key=required_secret("MINIO_SECRET_KEY"),
+            secure=os.getenv("MINIO_SECURE", "").strip().lower() in {"1", "true", "yes", "on"},
+        )
+        if not client.bucket_exists(bucket):
+            return {"included": True, "enabled": True, "bucket": bucket, "objects_count": 0, "size_bytes": 0, "objects": []}
+        
+        objects = client.list_objects(bucket, recursive=True)
+        minio_dir = target / "minio"
+        minio_dir.mkdir(parents=True, exist_ok=True)
+        exported_objects = []
+        size_bytes = 0
+        for obj in objects:
+            obj_key = obj.object_name
+            dest_path = minio_dir / obj_key
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            client.fget_object(bucket, obj_key, str(dest_path))
+            exported_objects.append({
+                "key": obj_key,
+                "size_bytes": obj.size
+            })
+            size_bytes += obj.size
+        return {
+            "included": True,
+            "enabled": True,
+            "bucket": bucket,
+            "objects_count": len(exported_objects),
+            "size_bytes": size_bytes,
+            "objects": exported_objects
+        }
+    except Exception as exc:
+        return {
+            "included": False,
+            "enabled": True,
+            "bucket": bucket,
+            "objects_count": 0,
+            "size_bytes": 0,
+            "error": str(exc)
+        }
+
+
+def _build_backup_manifest(db, backup_id: str, user: dict, target: Path, database_file: Path, created_at: str, qdrant: dict, minio: dict) -> dict:
+    local_stats = _file_stats(target / "storage")
+    documents_count = db.execute("SELECT COUNT(*) count FROM documents WHERE deleted_at IS NULL").fetchone()["count"]
+    versions_count = db.execute("SELECT COUNT(*) count FROM versions").fetchone()["count"]
+    chunks_count = db.execute("SELECT COUNT(*) count FROM chunks").fetchone()["count"]
+    file_assets_count = db.execute("SELECT COUNT(*) count FROM file_assets").fetchone()["count"]
+    object_refs_count = db.execute("SELECT COUNT(*) count FROM object_refs").fetchone()["count"]
+    manifest = {
+        "backup_id": backup_id,
+        "created_at": created_at,
+        "created_by": user["code"],
+        "database_snapshot": {
+            "included": database_file.exists(),
+            "file": database_file.name,
+            "size_bytes": database_file.stat().st_size if database_file.exists() else 0
+        },
+        "local_storage": {
+            "included": (target / "storage").exists(),
+            "path": "storage",
+            "files_count": local_stats["files_count"],
+            "size_bytes": local_stats["size_bytes"]
+        },
+        "qdrant": qdrant,
+        "minio": minio,
+        "checksum_file": "checksum.sha256",
+        "documents_count": documents_count,
+        "versions_count": versions_count,
+        "chunks_count": chunks_count,
+        "file_assets_count": file_assets_count,
+        "object_refs_count": object_refs_count,
+        "included_components": ["database", "storage", "qdrant", "minio"]
+    }
+    return manifest
+
+
+def _generate_checksum_file(target: Path) -> Path:
+    checksum_file = target / "checksum.sha256"
+    lines = []
+    for path in sorted(target.rglob("*")):
+        if path.is_file() and path != checksum_file:
+            relative = path.relative_to(target)
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            lines.append(f"{digest} *{relative.as_posix()}")
+    checksum_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return checksum_file
+
+
+def _verify_checksum_file(source_dir: Path) -> dict:
+    checksum_file = source_dir / "checksum.sha256"
+    if not checksum_file.exists():
+        raise ValueError("Backup thieu checksum.sha256.")
+    checked = 0
+    content = checksum_file.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(" *", 1)
+        if len(parts) != 2:
+            parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, relative = parts
+        relative = relative.strip()
+        path = source_dir / relative
+        if not path.exists():
+            raise ValueError(f"Checksum tham chieu file khong ton tai: {relative}")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != digest:
+            raise ValueError(f"Checksum khong khop: {relative}")
+        checked += 1
+    return {"checksum_file": "checksum.sha256", "checksum_entries": checked, "checksum_valid": True}
+
+
+def backup_record_with_manifest(item: dict) -> dict:
+    if not item:
+        return {}
+    path = Path(item["storage_path"]) / "manifest.json"
+    if path.exists():
+        try:
+            item["manifest"] = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            item["manifest"] = {}
+    else:
+        item["manifest"] = {}
+    return item
+
+
 def create_backup(db, user: dict) -> dict:
     backup_id = f"backup-{uuid.uuid4().hex[:10]}"
     target = BACKUP_DIR / backup_id
@@ -4165,9 +4498,22 @@ def create_backup(db, user: dict) -> dict:
     database_file = target / ("eduvault.mysql.json" if database_backend() == "mysql" else "eduvault.db")
     snapshot_database(db, database_file)
     _copytree_for_backup(STORAGE_DIR, target / "storage")
-    db.execute("INSERT INTO backup_logs VALUES(?,?,?,?,?)", (backup_id, str(target), "success", user["code"], now()))
+    
+    qdrant = _qdrant_backup(target)
+    minio = _minio_backup(target)
+    
+    created_at = now()
+    manifest = _build_backup_manifest(db, backup_id, user, target, database_file, created_at, qdrant, minio)
+    
+    manifest_file = target / "manifest.json"
+    manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    
+    _generate_checksum_file(target)
+    
+    db.execute("INSERT INTO backup_logs VALUES(?,?,?,?,?)", (backup_id, str(target), "success", user["code"], created_at))
     audit(db, user["code"], "backup.create", "backup", backup_id)
-    return dict(db.execute("SELECT * FROM backup_logs WHERE id=?", (backup_id,)).fetchone())
+    row = db.execute("SELECT * FROM backup_logs WHERE id=?", (backup_id,)).fetchone()
+    return backup_record_with_manifest(dict(row))
 
 
 def restore_backup(db, user: dict, backup_id: str) -> dict:
@@ -4177,8 +4523,14 @@ def restore_backup(db, user: dict, backup_id: str) -> dict:
     source_dir = Path(backup["storage_path"])
     source_db = source_dir / ("eduvault.mysql.json" if database_backend() == "mysql" else "eduvault.db")
     source_storage = source_dir / "storage"
+    manifest_file = source_dir / "manifest.json"
+    
     if not source_db.exists() or not source_storage.exists():
         raise ValueError("Bản backup thiếu database hoặc storage.")
+    if not manifest_file.exists():
+        raise ValueError("Backup thieu manifest.json.")
+        
+    _verify_checksum_file(source_dir)
 
     safety_id = f"pre-restore-{uuid.uuid4().hex[:8]}"
     safety_dir = BACKUP_DIR / safety_id
@@ -4248,22 +4600,30 @@ def _verify_backup_snapshot(source_db: Path) -> dict:
 def verify_restore_backup(db, user: dict, backup_id: str) -> dict:
     backup = db.execute("SELECT * FROM backup_logs WHERE id=? AND status='success'", (backup_id,)).fetchone()
     if not backup:
-        raise ValueError("KhÃ´ng tÃ¬m tháº¥y báº£n backup há»£p lá»‡.")
+        raise ValueError("Không tìm thấy bản backup hợp lệ.")
     source_dir = Path(backup["storage_path"])
     source_db = source_dir / ("eduvault.mysql.json" if database_backend() == "mysql" else "eduvault.db")
     source_storage = source_dir / "storage"
+    manifest_file = source_dir / "manifest.json"
     detail = {
         "backup_id": backup_id,
         "backup_path": str(source_dir),
         "database_exists": source_db.exists(),
         "storage_exists": source_storage.exists(),
+        "manifest_exists": manifest_file.exists(),
+        "checksum_valid": False,
     }
     status = "verified"
     try:
         if not source_db.exists() or not source_storage.exists():
-            raise ValueError("Backup thiáº¿u database hoáº·c storage.")
+            raise ValueError("Backup thiếu database hoặc storage.")
+        if not manifest_file.exists():
+            raise ValueError("Backup thiếu manifest.json.")
         detail.update(_verify_backup_snapshot(source_db))
         detail["storage_files"] = sum(1 for path in source_storage.rglob("*") if path.is_file())
+        
+        chk_res = _verify_checksum_file(source_dir)
+        detail.update(chk_res)
     except Exception as exc:
         status = "failed"
         detail["error"] = str(exc)

@@ -1006,7 +1006,75 @@ def test_restore_verification_dry_run():
     assert verified.json()["status"] == "verified"
     assert verified.json()["detail"]["database_exists"] is True
     assert verified.json()["detail"]["storage_exists"] is True
+    assert verified.json()["detail"]["manifest_exists"] is True
+    assert verified.json()["detail"]["checksum_valid"] is True
     assert status.json()["last_restore_verification"]["backup_id"] == backup.json()["id"]
+
+
+def test_backup_writes_manifest_and_checksum():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            admin = login(client, "ADMIN")
+            backup = client.post("/api/admin/backups", headers=admin)
+            assert backup.status_code == 201
+            backup_dir = Path(backup.json()["storage_path"])
+            manifest = backup_dir / "manifest.json"
+            checksum = backup_dir / "checksum.sha256"
+            assert manifest.exists()
+            assert checksum.exists()
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            assert payload["backup_id"] == backup.json()["id"]
+            assert payload["database_snapshot"]["included"] is True
+            assert payload["local_storage"]["included"] is True
+            assert "documents_count" in payload
+            assert "included_components" in payload
+            assert "manifest.json" in checksum.read_text(encoding="utf-8")
+
+
+def test_backup_succeeds_when_qdrant_backup_fails(monkeypatch):
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        monkeypatch.setattr(services, "_qdrant_backup", lambda _target: {"included": False, "enabled": True, "collections_count": 0, "vectors_count": 0, "error": "qdrant unavailable"})
+        with TestClient(app) as client:
+            admin = login(client, "ADMIN")
+            backup = client.post("/api/admin/backups", headers=admin)
+
+    assert backup.status_code == 201
+    manifest = backup.json()["manifest"]
+    assert manifest["qdrant"]["included"] is False
+    assert manifest["qdrant"]["error"] == "qdrant unavailable"
+    assert manifest["database_snapshot"]["included"] is True
+
+
+def test_backup_succeeds_when_minio_backup_fails(monkeypatch):
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        monkeypatch.setattr(services, "_minio_backup", lambda _target: {"included": False, "enabled": True, "bucket": "eduvault", "objects_count": 0, "size_bytes": 0, "error": "minio unavailable"})
+        with TestClient(app) as client:
+            admin = login(client, "ADMIN")
+            backup = client.post("/api/admin/backups", headers=admin)
+
+    assert backup.status_code == 201
+    manifest = backup.json()["manifest"]
+    assert manifest["minio"]["included"] is False
+    assert manifest["minio"]["error"] == "minio unavailable"
+    assert manifest["local_storage"]["included"] is True
+
+
+def test_restore_verification_fails_when_checksum_is_tampered():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            admin = login(client, "ADMIN")
+            backup = client.post("/api/admin/backups", headers=admin)
+            assert backup.status_code == 201
+            (Path(backup.json()["storage_path"]) / "manifest.json").write_text("{}", encoding="utf-8")
+            verified = client.post(f"/api/operations/backups/{backup.json()['id']}/verify", headers=admin)
+
+    assert verified.status_code == 200
+    assert verified.json()["status"] == "failed"
+    assert "Checksum" in verified.json()["detail"]["error"]
 
 
 def test_private_owner_anonymity_and_strict_chatbot_scope():

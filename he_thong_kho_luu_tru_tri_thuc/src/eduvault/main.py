@@ -31,7 +31,7 @@ from .services import (
     extraction_placeholder, global_knowledge_search, list_audit_logs, meaningful_text_score, qdrant_reindex_status, quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
     activate_policy_file, preview_policy_activation, preview_policy_action, rollback_policy_action, set_user_specializations, validate_folder_access,
     confirm_lecturer_assignment_batch, lecturer_assignment_batch_detail, list_lecturer_assignments, my_assignment, preview_lecturer_assignment_import,
-    operations_status, record_automation_heartbeat, verify_restore_backup,
+    backup_record_with_manifest, operations_status, record_automation_heartbeat, verify_restore_backup,
 )
 
 
@@ -534,7 +534,10 @@ def dashboard(user: dict = Depends(current_user)):
                 for item in anonymize_documents(docs, user)
             ],
             "requests": requests,
-            "backups": rows(db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()),
+            "backups": [
+                backup_record_with_manifest(dict(item))
+                for item in db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()
+            ],
             "audit": rows(db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20").fetchall()) if user["role"] == "admin" else [],
         }
 
