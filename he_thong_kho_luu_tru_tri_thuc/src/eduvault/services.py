@@ -3746,7 +3746,9 @@ def query_words(queries: list[str]) -> set[str]:
 
 def classify_query_intent(question: str) -> dict:
     folded = strip_accents(question).casefold()
-    if any(token in folded for token in ("tao mau", "tao bieu mau", "soan", "template")):
+    if is_location_query(question):
+        label = "document_location"
+    elif any(token in folded for token in ("tao mau", "tao bieu mau", "soan", "template")):
         label = "create_document"
     elif any(token in folded for token in ("tim tai lieu", "mo tai lieu", "van ban", "file", "pdf", "docx")):
         label = "document_lookup"
@@ -3755,6 +3757,88 @@ def classify_query_intent(question: str) -> dict:
     else:
         label = "question_answer"
     return {"label": label, "confidence": 0.9 if label != "question_answer" else 0.75}
+
+
+def is_location_query(question: str) -> bool:
+    folded = strip_accents(question).casefold()
+    location_terms = (
+        "luu o dau",
+        "luu tai dau",
+        "luu trong thu muc nao",
+        "thu muc nao",
+        "nam o dau",
+        "dang o dau",
+        "vi tri",
+        "duong dan",
+        "folder",
+        "path",
+    )
+    storage_terms = ("luu", "thu muc", "folder", "path", "duong dan", "vi tri", "nam")
+    return any(term in folded for term in location_terms) or (
+        any(term in folded for term in storage_terms) and any(token in folded for token in ("file", "tai lieu", "no", "nay", "do"))
+    )
+
+
+def document_metadata_context(document: dict, content: str) -> dict:
+    folder_path = document.get("folder_path") or "Chua phan loai"
+    metadata = "\n".join([
+        f"Tieu de: {document.get('title', '')}",
+        f"Loai tai lieu: {document.get('doc_type') or document.get('document_type') or ''}",
+        f"Chu de: {document.get('topic', '')}",
+        f"Thu muc luu tru: {folder_path}",
+        f"Chu so huu: {document.get('owner_code', '')}",
+        f"Trang thai: {document.get('status', '')}",
+    ])
+    return {
+        "title": document["title"],
+        "content": f"[Thong tin metadata]\n{metadata}\n\n[Noi dung tai lieu]\n{content}",
+    }
+
+
+def format_document_location_answer(document: dict) -> str:
+    folder_path = document.get("folder_path") or "Chưa phân loại"
+    doc_type = document.get("doc_type") or document.get("document_type") or "Chưa xác định"
+    topic = document.get("topic") or "Chưa xác định"
+    owner = document.get("owner_code") or "Chưa xác định"
+    return (
+        f"File **{document.get('title', 'tài liệu này')}** đang lưu ở:\n\n"
+        f"`{folder_path}`\n\n"
+        "Thông tin kèm theo:\n"
+        f"- Loại tài liệu: **{doc_type}**\n"
+        f"- Chủ đề: **{topic}**\n"
+        f"- Chủ sở hữu: **{owner}**"
+    )
+
+
+def document_name_match_score(question: str, document: dict) -> float:
+    folded_question = strip_accents(question).casefold()
+    title = strip_accents(str(document.get("title") or "")).casefold()
+    topic = strip_accents(str(document.get("topic") or "")).casefold()
+    doc_type = strip_accents(str(document.get("doc_type") or document.get("document_type") or "")).casefold()
+    title_words = {word for word in re.findall(r"\w+", title, re.UNICODE) if len(word) >= 2}
+    question_words_set = {word for word in re.findall(r"\w+", folded_question, re.UNICODE) if len(word) >= 2}
+    overlap = len(title_words & question_words_set)
+    score = float(overlap * 6)
+    compact_title = re.sub(r"\W+", " ", title).strip()
+    if compact_title and compact_title in folded_question:
+        score += 30
+    for field in (topic, doc_type):
+        field_words = {word for word in re.findall(r"\w+", field, re.UNICODE) if len(word) >= 3}
+        score += len(field_words & question_words_set)
+    return score
+
+
+def select_metadata_match(question: str, candidates: list[tuple[float, dict, str]], fallback_matches: list[tuple[float, dict, str]]) -> tuple[float, dict, str]:
+    pool = merge_ranked_matches(candidates + fallback_matches)
+    if not pool:
+        return fallback_matches[0]
+    return max(pool, key=lambda item: (document_name_match_score(question, item[1]), item[0]))
+
+
+def prioritize_match(selected: tuple[float, dict, str], matches: list[tuple[float, dict, str]]) -> list[tuple[float, dict, str]]:
+    ordered = [selected]
+    ordered.extend(item for item in matches if item[1]["id"] != selected[1]["id"])
+    return ordered[:3]
 
 
 def decompose_query(query: str, config: dict) -> list[str]:
@@ -4067,9 +4151,30 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
             "verification": {"status": "insufficient_evidence", "message": "Không đủ căn cứ từ tài liệu được phép truy cập."},
         }
 
+    if intent["label"] == "document_location":
+        selected_match = select_metadata_match(question, candidates, matches)
+        location_matches = prioritize_match(selected_match, matches)
+        answer = format_document_location_answer(selected_match[1])
+        top_score = selected_match[0] if selected_match else 0
+        verification = {
+            "status": "grounded" if top_score >= float(config.get("confidence_threshold", 1.0)) else "weak_evidence",
+            "message": "Cau tra loi lay truc tiep tu metadata tai lieu.",
+        }
+        return {
+            "answer": answer,
+            "citations": [citation_for(score, d, content) for score, d, content in location_matches],
+            "scope": "public_or_owned",
+            "intent": intent["label"],
+            "rewritten_query": rewritten_query,
+            "trace_id": trace_id,
+            "trace": trace,
+            "verification": verification,
+            "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "metadata_answer", "cite", "verify"],
+        }
+
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
-    answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, clean_answer_instructions(prompts.get("answer_instructions")))
+    answer = ai_provider.answer(question, [document_metadata_context(document, content) for _, document, content in matches], fallback, clean_answer_instructions(prompts.get("answer_instructions")))
     
     ocr_failed_matches = []
     for score, doc, content in matches:

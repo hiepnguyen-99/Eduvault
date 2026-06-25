@@ -1147,6 +1147,38 @@ def test_chatbot_stream_emits_status_deltas_and_citations():
             assert "verification" in events[-1]
 
 
+def test_chatbot_location_question_answers_from_document_metadata():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            created = client.post(
+                "/api/documents",
+                headers=lecturer,
+                json={
+                    "title": "Bai1 Tong quan he dieu hanh",
+                    "doc_type": "Slide",
+                    "topic": "He dieu hanh",
+                    "visibility": "public",
+                    "folder_path": "CNTT/He dieu hanh/Slide/public",
+                    "content": "Tong quan ve he dieu hanh, cau truc may tinh va quan ly tai nguyen.",
+                },
+            )
+            assert created.status_code == 201
+
+            response = client.post(
+                "/api/search",
+                headers=lecturer,
+                json={"question": "file bai1 tong quan he dieu hanh dang luu o thu muc nao"},
+            )
+
+            assert response.status_code == 200
+            result = response.json()
+            assert result["intent"] == "document_location"
+            assert "CNTT/He dieu hanh/Slide/public" in result["answer"]
+            assert result["citations"][0]["id"] == created.json()["id"]
+
+
 def test_prd_search_trace_filters_and_feedback_are_persisted():
     with tempfile.TemporaryDirectory() as directory:
         configure_temp_storage(Path(directory))
