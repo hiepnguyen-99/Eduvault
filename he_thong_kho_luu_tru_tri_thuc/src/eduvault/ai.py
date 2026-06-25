@@ -31,7 +31,7 @@ class AIProvider:
 
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 
     @property
@@ -65,10 +65,64 @@ class AIProvider:
             if content.get("type") == "output_text"
         )
 
+    def _ocr_images_batched(self, images: list[bytes], model: str) -> str:
+        max_pages = max(1, int(os.getenv("OCR_MAX_PAGES", "30")))
+        batch_pages = max(1, min(6, int(os.getenv("OCR_BATCH_PAGES", "4"))))
+        timeout = max(30, int(os.getenv("OPENAI_OCR_TIMEOUT_SECONDS", "180")))
+        outputs: list[str] = []
+        instruction = (
+            "Ban la he thong OCR tai lieu tieng Viet. "
+            "Trich xuat dung nguyen van, giu thu tu doc, khong tom tat, khong them nhan xet."
+        )
+        prompt = (
+            "Trich xuat toan bo chu trong cac trang PDF scan nay. "
+            "Neu trang bi nghieng hoac anh mo, hay co gang doc phan nhin thay. "
+            "Chi tra ve noi dung tai lieu."
+        )
+        selected = images[:max_pages]
+        for start in range(0, len(selected), batch_pages):
+            batch = selected[start:start + batch_pages]
+            content = [{"type": "input_text", "text": f"{prompt}\nTrang {start + 1}-{start + len(batch)}."}]
+            content.extend(
+                {"type": "input_image", "image_url": f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}"}
+                for image in batch
+            )
+            body = json.dumps(
+                {"model": model, "instructions": instruction, "input": [{"role": "user", "content": content}]},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"{self.base_url}/responses", data=body, method="POST",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                if data.get("output_text"):
+                    text = data["output_text"]
+                else:
+                    text = "\n".join(
+                        item.get("text", "")
+                        for output in data.get("output", [])
+                        for item in output.get("content", [])
+                        if item.get("type") == "output_text"
+                    )
+                if text.strip():
+                    outputs.append(text.strip())
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="ignore")[:500]
+                print(f"[ocr_images] OpenAI HTTP {exc.code} on pages {start + 1}-{start + len(batch)}: {detail}")
+            except (urllib.error.URLError, TimeoutError) as exc:
+                print(f"[ocr_images] OpenAI OCR unavailable on pages {start + 1}-{start + len(batch)}: {exc}")
+            except json.JSONDecodeError as exc:
+                print(f"[ocr_images] Invalid OCR response on pages {start + 1}-{start + len(batch)}: {exc}")
+        return "\n\n".join(outputs).strip()
+
     def ocr_images(self, images: list[bytes]) -> str:
         if not self.api_key or not images:
             return ""
         model = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini").strip() or self.model
+        return self._ocr_images_batched(images, model)
         content = [{"type": "input_text", "text": "Trích xuất nguyên văn toàn bộ chữ trong các trang tài liệu này. Giữ thứ tự đọc và xuống dòng hợp lý. Chỉ trả nội dung tài liệu."}]
         content.extend(
             {"type": "input_image", "image_url": f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}"}

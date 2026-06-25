@@ -1381,10 +1381,12 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
             specialization = db.execute("SELECT * FROM specializations WHERE folder_node_id=?", (spec_node["id"],)).fetchone() if spec_node else None
             final_specialization_id = specialization["id"] if specialization else final_specialization_id
         assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
-        if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
-            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
         if not assignment["folder_node_id"] and payload.folder_path:
             assignment["folder_path"] = payload.folder_path
+        if final_course_id and not assignment["folder_node_id"] and not assignment["folder_path"]:
+            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
+        if active_policy(db) and not assignment["folder_node_id"] and not assignment["folder_path"]:
+            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
         destination_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND status='active'", (assignment["folder_node_id"],)).fetchone() if assignment["folder_node_id"] else None
         if destination_node and destination_node["type"] in {"faculty", "specialization", "course"}:
             raise HTTPException(400, "Document must be saved inside a document-type folder.")
@@ -1671,6 +1673,11 @@ def provenance(document_id: str, user: dict = Depends(current_user)):
             ).fetchone()
             access = {"type": "approved_request", "request_id": approved["id"] if approved else None}
         versions_result = rows(db.execute("SELECT id,version_no,created_by,created_at FROM versions WHERE document_id=? ORDER BY version_no DESC", (document_id,)).fetchall())
+        indexed_preview_rows = db.execute(
+            "SELECT content FROM chunks WHERE document_id=? ORDER BY version_no DESC, created_at ASC LIMIT 6",
+            (document_id,),
+        ).fetchall()
+        indexed_preview = "\n\n".join(row["content"] for row in indexed_preview_rows if row["content"])
         if document["visibility"] == "private" and document["owner_code"] != user["code"]:
             for version in versions_result:
                 version["created_by"] = "Ẩn danh"
@@ -1681,6 +1688,7 @@ def provenance(document_id: str, user: dict = Depends(current_user)):
             "files": rows(db.execute("SELECT id,version_no,original_name,mime_type,size,created_at FROM file_assets WHERE document_id=? ORDER BY version_no DESC", (document_id,)).fetchall()),
             "objects": rows(db.execute("SELECT id,version_no,kind,provider,object_uri,checksum,size,created_at FROM object_refs WHERE document_id=? ORDER BY created_at DESC", (document_id,)).fetchall()),
             "v2_state": v2_state_for(db, document_id),
+            "indexed_preview": indexed_preview,
             "access": access,
         }
 

@@ -35,6 +35,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
+import { AssistantChat } from "@/components/assistant-chat";
 import { LoginScreen } from "@/components/login-screen";
 import { UploadTask, UploadTaskProvider, useUploadTasks } from "@/components/upload-task-provider";
 import { canAccessPath, permissionsForRole, ROLE_LABELS, ROLE_MENUS, toAppRole } from "@/src/config/role-menu";
@@ -61,6 +62,7 @@ const icons = {
 };
 
 const SIDEBAR_COLLAPSED_KEY = "eduvault.sidebar.collapsed";
+const GLOBAL_ASSISTANT_OPEN_KEY = "eduvault.global-assistant.open";
 const SIDEBAR_EXPANDED_WIDTH = 304;
 const SIDEBAR_COLLAPSED_WIDTH = 72;
 
@@ -157,6 +159,8 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const [headerQuery, setHeaderQuery] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarReady, setSidebarReady] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantReady, setAssistantReady] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -178,6 +182,20 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   }, [sidebarCollapsed, sidebarReady]);
 
   useEffect(() => {
+    try {
+      setAssistantOpen(window.localStorage.getItem(GLOBAL_ASSISTANT_OPEN_KEY) === "true");
+    } catch { /* ignore */ }
+    setAssistantReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!assistantReady) return;
+    try {
+      window.localStorage.setItem(GLOBAL_ASSISTANT_OPEN_KEY, String(assistantOpen));
+    } catch { /* ignore */ }
+  }, [assistantOpen, assistantReady]);
+
+  useEffect(() => {
     if (!ready || !user) return;
     const permissions = Array.from(new Set([...(user.permissions || []), ...permissionsForRole(user.role)]));
     if (!canAccessPath(path, permissions)) router.replace("/");
@@ -191,6 +209,18 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const appRole = toAppRole(user.role);
   const menuItems = ROLE_MENUS[appRole].filter(item => effectivePermissions.includes(item.permission));
   const sidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH;
+  const canUseAssistant = effectivePermissions.includes("chatbot.use");
+  const currentMenuItem = menuItems.find(item => path === item.href.split("?")[0]);
+  const assistantContext = {
+    title: currentMenuItem?.label || "EduVault",
+    lines: [
+      `Người dùng: ${user.name} (${user.code})`,
+      `Vai trò: ${ROLE_LABELS[appRole]}`,
+      user.department ? `Đơn vị: ${user.department}` : "",
+      `Trang hiện tại: ${currentMenuItem?.label || path}`,
+      "Chỉ trả lời theo phạm vi tài liệu và chức năng người dùng hiện tại được phép truy cập.",
+    ].filter(Boolean),
+  };
 
   function submitHeaderSearch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -245,10 +275,27 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
           <form onSubmit={submitHeaderSearch} className="flex h-10 max-w-xl flex-1 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 text-left text-sm text-[var(--muted)] focus-within:border-blue-300 focus-within:text-blue-700"><Search size={17}/><input className="min-w-0 flex-1 bg-transparent text-sm outline-none" value={headerQuery} onChange={event => setHeaderQuery(event.target.value)} placeholder="Tìm tài liệu, học phần, giảng viên..." /></form>
           <button className="icon-btn" aria-label="Đổi giao diện" onClick={() => setDark(!dark)}>{dark ? <Sun size={17}/> : <Moon size={17}/>}</button>
           <UploadNotificationMenu />
+          {canUseAssistant && <button className={assistantOpen ? "btn-primary hidden items-center gap-2 px-3 py-2 text-xs md:inline-flex" : "btn-secondary hidden items-center gap-2 px-3 py-2 text-xs md:inline-flex"} onClick={() => setAssistantOpen(value => !value)} aria-expanded={assistantOpen}><Bot size={15}/>{assistantOpen ? "Đóng AI" : "Trợ lý AI"}</button>}
           <div className="hidden items-center gap-2 border-l border-[var(--border)] pl-3 sm:flex"><div className="grid h-9 w-9 place-items-center rounded-full bg-blue-600 text-xs font-bold text-white">{user.code.slice(0, 2)}</div><div><strong className="block text-xs">{user.name}</strong><span className="muted text-[10px]">{ROLE_LABELS[appRole]} · {user.code}</span></div><button className="icon-btn ml-1" aria-label="Đăng xuất" onClick={logout}><LogOut size={15}/></button></div>
         </header>
         <main className="mx-auto max-w-[1680px] p-4 md:p-7">{children}</main>
       </div>
+      {canUseAssistant && <>
+        {!assistantOpen && <button
+          className="fixed bottom-5 right-5 z-[70] inline-flex h-12 items-center gap-2 rounded-full bg-blue-600 px-4 text-sm font-bold text-white shadow-xl shadow-blue-950/20 transition hover:bg-blue-700"
+          onClick={() => setAssistantOpen(true)}
+          aria-label="Mở trợ lý AI"
+        >
+          <Bot size={18}/>
+          <span className="hidden sm:inline">Trợ lý AI</span>
+        </button>}
+        {assistantOpen && <div className="fixed inset-0 z-[90] pointer-events-none">
+          <div className="absolute inset-0 bg-slate-950/20 opacity-100 md:hidden pointer-events-auto" onClick={() => setAssistantOpen(false)}/>
+          <aside className="pointer-events-auto absolute inset-y-0 right-0 w-[min(440px,100vw)] border-l border-[var(--border)] bg-[var(--card)] shadow-2xl">
+            <AssistantChat variant="panel" context={assistantContext} onClose={() => setAssistantOpen(false)}/>
+          </aside>
+        </div>}
+      </>}
     </div>
   );
 }

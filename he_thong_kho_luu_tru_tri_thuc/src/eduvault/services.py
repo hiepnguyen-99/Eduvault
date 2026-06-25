@@ -3441,8 +3441,9 @@ def extract_text(filename: str, mime_type: str, raw: bytes) -> str:
         try:
             import fitz
             pdf = fitz.open(stream=raw, filetype="pdf")
-            max_pages = int(__import__("os").getenv("OCR_MAX_PAGES", "30"))
-            images = [page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False).tobytes("png") for page in pdf[:max_pages]]
+            max_pages = int(os.getenv("OCR_MAX_PAGES", "30"))
+            render_scale = max(1.0, min(3.0, float(os.getenv("OCR_RENDER_SCALE", "1.8"))))
+            images = [page.get_pixmap(matrix=fitz.Matrix(render_scale, render_scale), alpha=False).tobytes("png") for page in pdf[:max_pages]]
             ocr_text = ai_provider.ocr_images(images).strip()
             if meaningful_text_score(ocr_text) >= 12:
                 return ocr_text
@@ -3451,7 +3452,7 @@ def extract_text(filename: str, mime_type: str, raw: bytes) -> str:
             print(f"[extract_text] OCR failed for {filename}: {e}")
         if extracted:
             return extracted
-        return f"[PDF scan chưa OCR được: {filename}]"
+        return extraction_placeholder(filename, extracted)
     return f"[File gốc: {filename}] Nội dung chưa được trích xuất. Cần cấu hình parser/OCR cho định dạng {suffix or mime_type}."
 
 
@@ -3862,6 +3863,26 @@ def is_insufficient_response(answer: str) -> bool:
     return any(p in lowered for p in phrases)
 
 
+def clean_answer_instructions(instructions: str | None) -> str:
+    text = instructions or ""
+    blocked_phrases = (
+        "Nêu tên tài liệu nguồn",
+        "nêu tên tài liệu nguồn",
+        "luôn nêu nguồn tài liệu",
+        "Nêu nguồn",
+        "nêu nguồn",
+    )
+    for phrase in blocked_phrases:
+        text = text.replace(phrase, "")
+    guardrail = (
+        "Trả lời bằng tiếng Việt, ngắn gọn và đúng trọng tâm. "
+        "Chỉ dùng ngữ cảnh được cung cấp; nếu chưa đủ căn cứ thì nói rõ. "
+        "Không viết mục nguồn trong thân câu trả lời vì giao diện đã hiển thị nguồn riêng. "
+        "Không tự thêm mục gợi ý học tập hoặc câu hỏi tiếp theo."
+    )
+    return f"{text}\n{guardrail}".strip()
+
+
 def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
     allowed = {document["id"]: document for document in rag_documents(db, user)}
     config = search_policy(db)
@@ -4048,7 +4069,7 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
 
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
-    answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, prompts.get("answer_instructions"))
+    answer = ai_provider.answer(question, [{"title": document["title"], "content": content} for _, document, content in matches], fallback, clean_answer_instructions(prompts.get("answer_instructions")))
     
     ocr_failed_matches = []
     for score, doc, content in matches:
@@ -4129,6 +4150,19 @@ def conversational_fallback(question: str, matches: list[tuple]) -> str:
 
 
 def ensure_conversational_format(answer: str, question: str) -> str:
+    stripped = answer.strip()
+    stripped = re.split(
+        r"\n#{0,3}\s*(?:Source|Sources|References|Nguon|Tai lieu tham khao)\s*:?",
+        stripped,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    for marker in ("\n### G", "\n### B", "\n## G", "\n## B"):
+        if marker in stripped:
+            stripped = stripped.split(marker, 1)[0].strip()
+    if stripped:
+        return stripped
+    return "Mình chưa có đủ thông tin từ tài liệu được phép truy cập để trả lời chắc chắn câu hỏi này."
     cleaned = re.split(
         r"\n#{0,3}\s*(?:📄\s*)?(?:Nguồn tham khảo|Nguồn tài liệu|Tài liệu tham khảo)\s*:?",
         answer.strip(),

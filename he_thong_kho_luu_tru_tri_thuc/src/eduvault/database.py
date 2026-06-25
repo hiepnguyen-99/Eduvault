@@ -829,7 +829,7 @@ def init_database() -> None:
             "INSERT OR IGNORE INTO policies VALUES ('ai_prompts', ?, ?)",
             (json.dumps({
                 "metadata_instructions": "Phân loại tài liệu học thuật tiếng Việt. Chỉ trả JSON hợp lệ, không markdown.",
-                "answer_instructions": "Trả lời bằng tiếng Việt, chỉ dựa trên ngữ cảnh. Nêu tên tài liệu nguồn và không tiết lộ dữ liệu ngoài ngữ cảnh."
+                "answer_instructions": "Trả lời bằng tiếng Việt, chỉ dựa trên ngữ cảnh được cung cấp. Không bịa, không nêu nguồn trong thân câu trả lời vì giao diện hiển thị nguồn riêng. Nếu bằng chứng yếu, nói rõ chưa đủ căn cứ."
             }, ensure_ascii=False), now()),
         )
         db.execute(

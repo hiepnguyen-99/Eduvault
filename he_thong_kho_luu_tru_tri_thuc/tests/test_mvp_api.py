@@ -1112,12 +1112,9 @@ def test_private_owner_anonymity_and_strict_chatbot_scope():
 
             owner_answer = client.post("/api/search", headers=owner, json={"question": "phản biện chéo đề thi"}).json()
             assert any(item["id"] == "doc-exam-process" for item in owner_answer["citations"])
-            assert all(section in owner_answer["answer"] for section in (
-                "### Nội dung trọng tâm",
-                "### Những phần cần chú ý",
-                "### Gợi ý học tập",
-                "### Bạn có thể hỏi tiếp",
-            ))
+            assert owner_answer["answer"].strip()
+            assert "### Gợi ý học tập" not in owner_answer["answer"]
+            assert "### Bạn có thể hỏi tiếp" not in owner_answer["answer"]
             assert not owner_answer["answer"].startswith(("Nguồn tài liệu", "Tóm tắt", "Kết quả"))
 
             pipeline = client.get("/api/rag/pipeline", headers=requester)

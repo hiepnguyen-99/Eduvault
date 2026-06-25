@@ -12,6 +12,7 @@ type Answer = { answer: string; citations: Citation[]; scope: string; trace_id?:
 type FeedbackRating = "up" | "wrong_source" | "missing_document";
 type MessageItem = { question: string; result: Answer; status?: string; streaming?: boolean; feedback?: FeedbackRating };
 type Conversation = { id: string; title: string; messages: MessageItem[]; updatedAt: number };
+type AssistantMemory = { shortTerm: string[]; longTerm: string[]; updatedAt: number };
 type StreamEvent =
   | { type: "status"; message: string }
   | { type: "delta"; text: string }
@@ -33,9 +34,14 @@ type AssistantChatProps = {
 type DocPreview = { id: string; title: string; content: string; files: { id: string; original_name: string; mime_type: string; size: number }[] };
 
 const STORAGE_KEY = "eduvault_conversations";
+const MEMORY_KEY = "eduvault_assistant_memory";
 
 function convStorageKey(code: string): string {
-  return `${STORAGE_KEY}:${code}`;
+  return `${STORAGE_KEY}:v2:${code}`;
+}
+
+function memoryStorageKey(code: string): string {
+  return `${MEMORY_KEY}:${code}`;
 }
 
 function newConv(): Conversation {
@@ -77,10 +83,18 @@ function FriendlyAnswer({ answer }: { answer: string }) {
   return <div className="space-y-3">{blocks}</div>;
 }
 
-function buildContextQuestion(question: string, context?: AssistantContext) {
+function buildContextQuestion(question: string, context?: AssistantContext, memory?: AssistantMemory) {
   const lines = (context?.lines || []).map(line => line.trim()).filter(Boolean);
-  if (!lines.length) return question;
-  return `Ngữ cảnh trang hiện tại: ${context?.title || "EduVault"}\n${lines.join("\n")}\n\nCâu hỏi của người dùng: ${question}`;
+  const shortTerm = (memory?.shortTerm || []).slice(-5);
+  const longTerm = (memory?.longTerm || []).slice(-8);
+  if (!lines.length && !shortTerm.length && !longTerm.length) return question;
+  return [
+    `Ngữ cảnh trang hiện tại: ${context?.title || "EduVault"}`,
+    ...lines,
+    shortTerm.length ? `Bộ nhớ ngắn hạn:\n${shortTerm.map(item => `- ${item}`).join("\n")}` : "",
+    longTerm.length ? `Bộ nhớ dài hạn:\n${longTerm.map(item => `- ${item}`).join("\n")}` : "",
+    `Câu hỏi của người dùng: ${question}`,
+  ].filter(Boolean).join("\n\n");
 }
 
 function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: (id: string, title: string) => void }) {
@@ -161,9 +175,12 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<DocPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [memory, setMemory] = useState<AssistantMemory>({ shortTerm: [], longTerm: [], updatedAt: Date.now() });
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const loadedKey = useRef("");
   const storageKey = user ? convStorageKey(user.code) : "";
+  const memoryKey = user ? memoryStorageKey(user.code) : "";
   const activeConv = conversations.find(c => c.id === activeId);
   const messages = activeConv?.messages ?? [];
   const isPanel = variant === "panel";
@@ -183,6 +200,27 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
   }, [storageKey]);
 
   useEffect(() => {
+    if (!memoryKey) return;
+    let loaded: AssistantMemory = { shortTerm: [], longTerm: [], updatedAt: Date.now() };
+    try {
+      const saved = localStorage.getItem(memoryKey);
+      if (saved) loaded = { ...loaded, ...JSON.parse(saved) };
+    } catch { /* ignore invalid memory */ }
+    setMemory({
+      shortTerm: Array.isArray(loaded.shortTerm) ? loaded.shortTerm.slice(-8) : [],
+      longTerm: Array.isArray(loaded.longTerm) ? loaded.longTerm.slice(-16) : [],
+      updatedAt: loaded.updatedAt || Date.now(),
+    });
+  }, [memoryKey]);
+
+  useEffect(() => {
+    if (!memoryKey) return;
+    try {
+      localStorage.setItem(memoryKey, JSON.stringify(memory));
+    } catch { /* ignore quota errors */ }
+  }, [memory, memoryKey]);
+
+  useEffect(() => {
     if (!storageKey || loadedKey.current !== storageKey || !conversations.length) return;
     try {
       const toSave = conversations.map(c => ({
@@ -199,6 +237,22 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
 
   function updateMessage(convId: string, msgIndex: number, update: (m: MessageItem) => MessageItem) {
     setConversations(prev => prev.map(c => c.id === convId ? { ...c, messages: c.messages.map((m, i) => i === msgIndex ? update(m) : m), updatedAt: Date.now() } : c));
+  }
+
+  function rememberQuestion(value: string) {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (!normalized) return;
+    setMemory(prev => {
+      const shortTerm = [...prev.shortTerm.filter(item => item !== normalized), normalized].slice(-8);
+      const shouldKeepLongTerm = normalized.length >= 18 && !/^(ok|uh|ừ|vang|vâng|cam on|cảm ơn)$/i.test(normalized);
+      const longTerm = shouldKeepLongTerm ? [...prev.longTerm.filter(item => item !== normalized), normalized].slice(-16) : prev.longTerm;
+      return { shortTerm, longTerm, updatedAt: Date.now() };
+    });
+  }
+
+  function clearMemory() {
+    setMemory({ shortTerm: [], longTerm: [], updatedAt: Date.now() });
+    setMemoryOpen(false);
   }
 
   function createNew() {
@@ -254,6 +308,7 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
     setQuestion("");
     setLoading(true);
     setError("");
+    rememberQuestion(displayQuestion);
 
     const targetId = activeId;
     let msgIndex = -1;
@@ -279,7 +334,7 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
       const response = await fetch(`${API_URL}/api/search/stream`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ question: buildContextQuestion(displayQuestion, context) }),
+        body: JSON.stringify({ question: buildContextQuestion(displayQuestion, context, memory) }),
       });
       if (!response.ok || !response.body) throw new Error(`Máy chủ trả về lỗi HTTP ${response.status}.`);
 
@@ -344,6 +399,7 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
         <p className="muted mt-0.5 truncate text-[11px]">{context?.title || "Hỏi đáp trên kho tri thức được phép truy cập"}</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
+        <button className={memoryOpen ? "btn-secondary h-8 px-2 text-[11px] text-blue-700" : "btn-secondary h-8 px-2 text-[11px]"} title="Bộ nhớ trợ lý" aria-label="Bộ nhớ trợ lý" onClick={() => setMemoryOpen(value => !value)}><MessageSquare size={13}/>Bộ nhớ</button>
         <button className="icon-btn h-8 w-8" title="Cuộc hội thoại mới" aria-label="Cuộc hội thoại mới" onClick={createNew}><Plus size={14}/></button>
         <button className="icon-btn h-8 w-8" title="Xóa nội dung chat" aria-label="Xóa nội dung chat" onClick={clearActive}><Trash2 size={14}/></button>
         {onClose && <button className="icon-btn h-8 w-8" title="Đóng trợ lý" aria-label="Đóng trợ lý" onClick={onClose}><X size={15}/></button>}
@@ -353,6 +409,23 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
     {contextLines.length > 0 && <div className="shrink-0 border-b border-[var(--border)] bg-blue-50/60 px-4 py-2 text-[11px] text-blue-900">
       <strong className="block">Ngữ cảnh hiện tại</strong>
       <p className="mt-1 line-clamp-2">{contextLines.join(" · ")}</p>
+    </div>}
+
+    {memoryOpen && <div className="shrink-0 border-b border-[var(--border)] bg-[var(--soft)] px-4 py-3 text-[11px]">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <strong>Bộ nhớ của trợ lý</strong>
+        <button className="text-[11px] font-bold text-red-600 hover:underline" onClick={clearMemory}>Xóa bộ nhớ</button>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-2">
+          <span className="muted font-semibold">Ngắn hạn</span>
+          <p className="mt-1 line-clamp-3">{memory.shortTerm.slice(-4).join(" · ") || "Chưa có nội dung."}</p>
+        </div>
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-2">
+          <span className="muted font-semibold">Dài hạn</span>
+          <p className="mt-1 line-clamp-3">{memory.longTerm.slice(-4).join(" · ") || "Chưa có nội dung."}</p>
+        </div>
+      </div>
     </div>}
 
     <div className={`min-h-0 flex-1 ${isPanel ? "flex flex-col" : "grid xl:grid-cols-[240px_minmax(0,1fr)]"}`}>

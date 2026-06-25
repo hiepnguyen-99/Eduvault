@@ -92,3 +92,15 @@ button { cursor: pointer; }
 .ai-result em { font-style: italic; }
 .ai-result code { background: var(--soft, #f1f5f9); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.8rem; }
 .ai-result blockquote { border-left: 3px solid var(--blue); padding-left: 0.75rem; color: var(--muted); margin: 0.5rem 0; }
+
+.docx-preview h1 { font-size: 1.5rem; font-weight: 700; margin: 1.2rem 0 0.6rem; }
+.docx-preview h2 { font-size: 1.2rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+.docx-preview h3 { font-size: 1rem; font-weight: 600; margin: 0.8rem 0 0.4rem; }
+.docx-preview p { margin-bottom: 0.6rem; }
+.docx-preview table { border-collapse: collapse; width: 100%; margin: 0.8rem 0; }
+.docx-preview td, .docx-preview th { border: 1px solid #d1d5db; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
+.docx-preview th { background: #f1f5f9; font-weight: 600; }
+.docx-preview ul, .docx-preview ol { padding-left: 1.5rem; margin-bottom: 0.6rem; }
+.docx-preview li { margin-bottom: 0.2rem; }
+.docx-preview strong { font-weight: 700; }
+.docx-preview em { font-style: italic; }

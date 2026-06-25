@@ -24,6 +24,7 @@ type Provenance = {
   versions: { id: string; version_no: number; created_by: string; created_at: string }[];
   sync_history: { id: string; status: string; detail: string; created_at: string }[];
   files: { id: string; version_no: number; original_name: string; mime_type: string; size: number; created_at: string }[];
+  indexed_preview: string;
   access: { type: "public" | "owner" | "approved_request"; request_id: string | null };
 };
 
@@ -32,7 +33,7 @@ type ChatItem = { question: string; answer: string; citations: Citation[]; isPre
 
 const empty: Provenance = {
   document: { id: "", title: "", doc_type: "", topic: "", owner_code: "", visibility: "public", current_version: 0, created_at: "", updated_at: "", folder_path: "" },
-  versions: [], sync_history: [], files: [],
+  versions: [], sync_history: [], files: [], indexed_preview: "",
   access: { type: "public", request_id: null },
 };
 
@@ -55,6 +56,134 @@ function CitationToggle({ citations }: { citations: Citation[] }) {
               <FileText size={11}/>{c.title}
             </Link>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isPdfFile(file: Provenance["files"][number]) {
+  const mime = (file.mime_type || "").toLowerCase();
+  const name = (file.original_name || "").toLowerCase();
+  return mime.includes("pdf") || name.endsWith(".pdf");
+}
+
+function isImageFile(file: Provenance["files"][number]) {
+  return (file.mime_type || "").toLowerCase().startsWith("image/");
+}
+
+function isDocxFile(file: Provenance["files"][number]) {
+  const mime = (file.mime_type || "").toLowerCase();
+  const name = (file.original_name || "").toLowerCase();
+  return mime.includes("wordprocessingml") || name.endsWith(".docx");
+}
+
+function DocumentFileViewer({ files }: { files: Provenance["files"] }) {
+  const { token } = useAuth();
+  const [viewerUrl, setViewerUrl] = useState("");
+  const [viewerName, setViewerName] = useState("");
+  const [viewerMime, setViewerMime] = useState("");
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewerError, setViewerError] = useState("");
+  const [docxHtml, setDocxHtml] = useState("");
+
+  useEffect(() => {
+    let revoked = false;
+    let objectUrl = "";
+
+    async function load() {
+      setViewerError("");
+      setViewerUrl("");
+      setViewerName("");
+      setViewerMime("");
+      setDocxHtml("");
+
+      const sorted = [...(files || [])].sort((a, b) => {
+        const byVersion = (b.version_no || 0) - (a.version_no || 0);
+        if (byVersion) return byVersion;
+        return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+      });
+      const selected = sorted.find(isPdfFile) || sorted.find(isImageFile) || sorted.find(isDocxFile) || sorted[0];
+      if (!selected?.id) return;
+      if (!token) {
+        setViewerError("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại để xem file.");
+        return;
+      }
+
+      setViewerLoading(true);
+      setViewerName(selected.original_name || "file");
+      setViewerMime(selected.mime_type || "application/octet-stream");
+      try {
+        const response = await fetch(`${API_URL}/api/files/${selected.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`Không tải được file (HTTP ${response.status})`);
+        const blob = await response.blob();
+        if (isDocxFile(selected)) {
+          const mammoth = (await import("mammoth")).default;
+          const result = await mammoth.convertToHtml({ arrayBuffer: await blob.arrayBuffer() });
+          if (!revoked) {
+            setDocxHtml(result.value);
+            setViewerUrl("__docx__");
+          }
+        } else {
+          objectUrl = URL.createObjectURL(blob);
+          if (!revoked) setViewerUrl(objectUrl);
+        }
+      } catch (error) {
+        if (!revoked) setViewerError(error instanceof Error ? error.message : "Không tải được file.");
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      } finally {
+        if (!revoked) setViewerLoading(false);
+      }
+    }
+
+    void load();
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [files, token]);
+
+  if (!files.length) return null;
+
+  return (
+    <div id="pdf" className="mt-6 app-card p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="section-title">
+            {viewerMime.includes("pdf") ? "PDF" : viewerMime.startsWith("image/") ? "Hình ảnh" : viewerUrl === "__docx__" ? "DOCX" : "Tệp gốc"}
+          </h3>
+          {viewerName && <p className="muted mt-1 text-[11px]">Đang xem: {viewerName}</p>}
+        </div>
+        {viewerUrl && viewerUrl !== "__docx__" && <a href={viewerUrl} download={viewerName} className="btn-secondary text-xs"><Download size={14}/>Tải xuống</a>}
+      </div>
+
+      {viewerLoading && <p className="muted mt-3 flex items-center gap-2 text-xs"><LoaderCircle className="animate-spin" size={14}/>Đang tải file...</p>}
+      {viewerError && <p className="mt-3 rounded bg-red-50 p-3 text-xs text-red-700">{viewerError}</p>}
+
+      {viewerUrl && viewerMime.includes("pdf") && (
+        <iframe src={viewerUrl} className="mt-3 h-[85vh] w-full rounded-md border border-[var(--border)] bg-white" title={viewerName}/>
+      )}
+      {viewerUrl && viewerMime.startsWith("image/") && (
+        <img src={viewerUrl} alt={viewerName} className="mt-3 max-h-[85vh] max-w-full rounded-md border border-[var(--border)] object-contain"/>
+      )}
+      {viewerUrl === "__docx__" && docxHtml && (
+        <div className="mt-3 h-[85vh] w-full overflow-y-auto rounded-md border border-[var(--border)] bg-[#525659]">
+          <div
+            className="docx-preview mx-auto my-6 max-w-[794px] bg-white px-[72px] py-[96px] text-[14px] leading-relaxed text-slate-800 shadow-lg"
+            dangerouslySetInnerHTML={{ __html: docxHtml }}
+          />
+        </div>
+      )}
+      {viewerUrl && !viewerMime.includes("pdf") && !viewerMime.startsWith("image/") && viewerUrl !== "__docx__" && (
+        <div className="mt-3 flex items-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--soft)] p-4">
+          <FileText size={24} className="shrink-0 text-blue-600"/>
+          <div className="min-w-0 flex-1">
+            <strong className="block truncate text-sm">{viewerName}</strong>
+            <span className="muted text-xs">Định dạng này không xem trực tiếp được trong trình duyệt.</span>
+          </div>
+          <a href={viewerUrl} download={viewerName} className="btn-primary"><Download size={14}/>Tải xuống</a>
         </div>
       )}
     </div>
@@ -90,6 +219,12 @@ export default function DocumentViewer() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
   const [convId, setConvId] = useState<string | null>(null);
+  const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string>("");
+  const [fileMime, setFileMime] = useState<string>("");
+  const [fileLoading, setFileLoading] = useState(false);
+  const [fileError, setFileError] = useState<string>("");
+  const [docxHtml, setDocxHtml] = useState<string>("");
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfName, setPdfName] = useState<string>("");
   const [pdfLoading, setPdfLoading] = useState(false);
@@ -157,6 +292,7 @@ export default function DocumentViewer() {
     let revoked = false;
     let currentUrl: string | null = null;
     if (!token) return;
+    return;
     async function loadPdf() {
       setPdfError("");
 
@@ -278,6 +414,20 @@ export default function DocumentViewer() {
               {!data.files.length && <p className="muted text-xs">Tài liệu này chưa có tệp gốc.</p>}
             </div>
 
+            {!data.files.length && (
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <strong className="block">Tài liệu này không có tệp gốc đính kèm.</strong>
+                <span className="mt-1 block">Đây thường là tài liệu demo hoặc tài liệu tạo thủ công. AI vẫn có thể tra cứu nếu nội dung đã được lập chỉ mục.</span>
+              </div>
+            )}
+
+            {!data.files.length && data.indexed_preview && (
+              <div className="mt-5 rounded-xl border border-[var(--border)] bg-[var(--soft)] p-4">
+                <h3 className="section-title">Nội dung đã lập chỉ mục</h3>
+                <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-white p-3 text-xs leading-relaxed text-slate-700">{data.indexed_preview}</pre>
+              </div>
+            )}
+
             {/* AI Chat section */}
             <div className="mt-8">
               <div className="flex items-center justify-between">
@@ -373,8 +523,9 @@ export default function DocumentViewer() {
           </div>
         </Panel>
       </div>
-      {/* PDF viewer at end of page */}
-      <div id="pdf" className="mt-6 app-card p-4">
+      <DocumentFileViewer files={data.files}/>
+      {/* Legacy PDF preload kept hidden */}
+      <div className="hidden">
         <h3 className="section-title">PDF</h3>
 
         {pdfLoading && <p className="muted text-xs mt-2">Đang tải PDF…</p>}

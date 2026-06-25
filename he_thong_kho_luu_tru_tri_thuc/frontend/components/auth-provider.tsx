@@ -15,6 +15,7 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 const SESSION_KEY = "eduvault_session";
+const AUTH_BOOT_TIMEOUT_MS = 5000;
 
 function normalizeUser(user: User): User {
   const rolePermissions = permissionsForRole(user.role);
@@ -47,7 +48,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setReady(true);
       return;
     }
-    api<DashboardData>("/api/dashboard", {}, stored)
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), AUTH_BOOT_TIMEOUT_MS);
+    api<DashboardData>("/api/dashboard", { signal: controller.signal }, stored)
       .then((data) => {
         const nextUser = normalizeUser(data.user);
         setToken(stored);
@@ -57,8 +60,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {
         localStorage.removeItem("eduvault_token");
         sessionStorage.removeItem(SESSION_KEY);
+        setToken("");
+        setUser(null);
       })
-      .finally(() => setReady(true));
+      .finally(() => {
+        window.clearTimeout(timeoutId);
+        setReady(true);
+      });
   }, []);
 
   async function login(code: string, password: string) {
@@ -71,6 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: result.token, user: nextUser }));
     setToken(result.token);
     setUser(nextUser);
+    setReady(true);
   }
 
   async function logout() {

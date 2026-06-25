@@ -73,6 +73,7 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
     "reports.view",
     "audit.view",
     "transfer.manage",
+    "chatbot.use",
   ],
   HEAD_OF_DEPARTMENT: [
     "dashboard.view",
