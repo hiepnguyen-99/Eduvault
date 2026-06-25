@@ -1,0 +1,65 @@
+{
+  "faculty": "Công nghệ thông tin",
+  "faculty_code": "CNTT",
+  "specializations": [
+    {
+      "name": "Khoa học máy tính (Computer Science)",
+      "name_vi": "Khoa học máy tính",
+      "name_en": "Computer Science",
+      "code": "KHMT",
+      "courses": [
+        { "name": "Trí tuệ nhân tạo", "code": "AI001" },
+        { "name": "Học máy", "code": "ML001" },
+        { "name": "Cấu trúc dữ liệu và giải thuật", "code": "DSA001" },
+        { "name": "Lập trình hướng đối tượng", "code": "OOP001" },
+        { "name": "Hệ điều hành", "code": "OS001" },
+        { "name": "Mạng máy tính", "code": "NET001" }
+      ]
+    },
+    {
+      "name": "Kỹ thuật phần mềm (Software Engineering)",
+      "name_vi": "Kỹ thuật phần mềm",
+      "name_en": "Software Engineering",
+      "code": "KTPM",
+      "courses": [
+        { "name": "Công nghệ phần mềm", "code": "SE001" },
+        { "name": "Kiểm thử phần mềm", "code": "SE002" },
+        { "name": "Phân tích thiết kế hệ thống", "code": "SE003" },
+        { "name": "Lập trình Web", "code": "WEB001" },
+        { "name": "Cơ sở dữ liệu", "code": "DB001" }
+      ]
+    },
+    {
+      "name": "Khoa học dữ liệu (Data Science)",
+      "name_vi": "Khoa học dữ liệu",
+      "name_en": "Data Science",
+      "code": "KHDL",
+      "courses": [
+        { "name": "Khai phá dữ liệu", "code": "DS001" },
+        { "name": "Thống kê ứng dụng", "code": "DS002" },
+        { "name": "Trực quan hóa dữ liệu", "code": "DS003" },
+        { "name": "Xử lý ngôn ngữ tự nhiên", "code": "NLP001" },
+        { "name": "Deep Learning", "code": "DL001" }
+      ]
+    },
+    {
+      "name": "Internet of Things (IoT)",
+      "name_vi": "Internet of Things",
+      "name_en": "Internet of Things",
+      "code": "IOT",
+      "courses": [
+        { "name": "Lập trình nhúng", "code": "IOT001" },
+        { "name": "Giao thức IoT", "code": "IOT002" },
+        { "name": "Điện tử cơ bản", "code": "IOT003" }
+      ]
+    }
+  ],
+  "standard_folders": [
+    "Đề cương học phần",
+    "Bài giảng",
+    "Tài liệu tham khảo",
+    "Đề thi",
+    "Bài tập lớn",
+    "Nghiên cứu khoa học"
+  ]
+}

@@ -134,6 +134,7 @@ class AnalyzeInput(BaseModel):
 class Question(BaseModel):
     question: str = Field(min_length=2, max_length=1000)
     filters: dict | None = None
+    current_page: str | None = None
 
 
 class SearchFeedbackInput(BaseModel):
@@ -1736,7 +1737,7 @@ def rollback(document_id: str, version_no: int, user: dict = Depends(current_use
 @app.post("/api/search")
 def search(payload: Question, user: dict = Depends(current_user)):
     with transaction() as db:
-        return ask(db, user, payload.question, payload.filters)
+        return ask(db, user, payload.question, payload.filters, payload.current_page)
 
 
 @app.post("/api/search/stream")
@@ -1745,7 +1746,7 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
         yield json.dumps({"type": "status", "message": "Đang tìm trong kho tri thức..."}, ensure_ascii=False) + "\n"
         try:
             with transaction() as db:
-                result = ask(db, user, payload.question, payload.filters)
+                result = ask(db, user, payload.question, payload.filters, payload.current_page)
         except Exception as exc:
             yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
             return

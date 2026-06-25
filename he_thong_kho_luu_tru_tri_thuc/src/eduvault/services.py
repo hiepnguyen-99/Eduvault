@@ -3691,7 +3691,7 @@ def search_policy(db) -> dict:
         "title_boost": 3.0,
         "top_k": 8,
         "rerank_k": 5,
-        "confidence_threshold": 1.0,
+        "confidence_threshold": 0.3,
         "decompose_min_chars": 120,
         "synonyms": {
             "ai": ["trí tuệ nhân tạo", "artificial intelligence"],
@@ -3746,17 +3746,171 @@ def query_words(queries: list[str]) -> set[str]:
 
 def classify_query_intent(question: str) -> dict:
     folded = strip_accents(question).casefold()
-    if is_location_query(question):
+    # Thống kê / báo cáo — check trước upload_help vì "bao cao tai len" sẽ nhầm upload
+    if any(token in folded for token in ("thong ke", "bao cao", "phan tich so lieu", "so sanh giang vien", "xu huong", "bieu do", "analytics", "dashboard", "so lieu", "hoat dong tai len")):
+        label = "analytics_query"
+    # Tài liệu của chính mình — check trước upload_help vì "da upload" sẽ nhầm upload_help
+    elif any(token in folded for token in ("tai lieu cua toi", "file cua toi", "cua minh", "toi da tai", "da upload", "ban than minh", "cua ban than", "toi da up", "nhung file nao")):
+        label = "own_document_lookup"
+    # Chuyển giao tri thức — check trước upload_help
+    elif any(token in folded for token in ("chuyen giao", "ban giao", "ke thua", "tiep nhan", "handover", "transfer", "nguoi thay the")):
+        label = "knowledge_transfer"
+    # Upload / hướng dẫn tải lên
+    elif any(token in folded for token in ("upload", "tai len", "dang tai", "up file", "lam sao de up", "huong dan tai", "huong dan upload", "cach tai len", "cach tai ", "cach upload", "lam sao tai")):
+        label = "upload_help"
+    elif is_location_query(question):
         label = "document_location"
+    # Phiên bản — check trước document_lookup vì "ban cu cua file" sẽ nhầm document_lookup
+    elif any(token in folded for token in ("phien ban", "version", "lich su sua", "lich su chinh sua", "cap nhat", "ban moi nhat", "ban cu", "lich su phien ban")):
+        label = "version_management"
+    # Tạo mẫu / template
     elif any(token in folded for token in ("tao mau", "tao bieu mau", "soan", "template")):
         label = "create_document"
-    elif any(token in folded for token in ("tim tai lieu", "mo tai lieu", "van ban", "file", "pdf", "docx")):
+    # Trạng thái hệ thống — check trước document_lookup vì "he thong dang xu ly bao nhieu file" sẽ nhầm
+    elif any(token in folded for token in ("he thong co van de", "loi he thong", "kiem tra he thong", "trang thai he thong", "system status", "dang indexing", "xu ly file", "xu ly tai lieu", "he thong dang", "bao nhieu file dang")):
+        label = "system_status"
+    # Quản lý policy — check trước onboarding vì "them chuyen nganh moi vao" sẽ nhầm onboarding
+    elif any(token in folded for token in ("chinh sach", "cay thu muc", "cau truc khoa", "them chuyen nganh", "them mon hoc", "policy", "them folder", "cau truc thu muc", "cau hinh policy")):
+        label = "policy_management"
+    # Quản lý người dùng (admin) — check trước onboarding
+    elif any(token in folded for token in ("them giang vien", "xoa tai khoan", "cap quyen", "phan quyen", "quan ly user", "quan ly nguoi dung", "tai khoan", "account")):
+        label = "user_management"
+    # Hướng dẫn onboarding cho giảng viên mới
+    elif any(token in folded for token in ("moi vao", "moi duoc phan cong", "bat dau tu dau", "lam quen", "gioi thieu he thong", "huong dan su dung", "onboard", "buoc dau", "can lam gi truoc")):
+        label = "onboarding_guide"
+    # Phân tích khoảng trống tri thức
+    elif any(token in folded for token in ("khoang trong", "thieu tai lieu", "mon thieu", "chua co tai lieu", "con thieu", "can them tai lieu")):
+        label = "knowledge_gap_analysis"
+    # Tra cứu tài liệu chung
+    elif any(token in folded for token in ("tim tai lieu", "mo tai lieu", "van ban", "file", "pdf", "docx", "tham khao", "tai lieu tham khao")):
         label = "document_lookup"
-    elif any(token in folded for token in ("chu de", "noi ve", "lien quan", "tong hop")):
+    # Chủ đề / tổng hợp / chuẩn bị môn học
+    elif any(token in folded for token in ("chu de", "noi ve", "lien quan", "tong hop", "chuan bi tai lieu", "chuan bi slide", "chuan bi bai giang", "can tai lieu", "can nhung gi", "can gi de day", "tai lieu cho mon", "tai lieu mon", "slide bai giang", "bai giang cho mon")):
         label = "topic_search"
     else:
         label = "question_answer"
     return {"label": label, "confidence": 0.9 if label != "question_answer" else 0.75}
+
+
+# ---------------------------------------------------------------------------
+# Role-aware chatbot context
+# ---------------------------------------------------------------------------
+
+ROLE_SYSTEM_PROMPTS: dict[str, str] = {
+    "admin": (
+        "Bạn là trợ lý quản trị viên của hệ thống EduVault. "
+        "Người dùng có toàn quyền quản lý hệ thống: thêm/xoá tài khoản giảng viên, "
+        "cấu hình policy chuyên ngành, xem mọi tài liệu, xem audit log và thống kê toàn bộ khoa. "
+        "Khi trả lời về người dùng hoặc tài liệu, hãy gợi ý các thao tác quản trị cụ thể nếu phù hợp. "
+        "Ưu tiên trả lời ngắn gọn, rõ ràng và hành động được ngay."
+    ),
+    "head": (
+        "Bạn là trợ lý trưởng bộ môn trong hệ thống EduVault. "
+        "Người dùng quản lý tất cả tài liệu trong bộ môn mình, có thể xem báo cáo khoảng trống tri thức, "
+        "theo dõi tình trạng chuyển giao tài liệu giữa các giảng viên. "
+        "Hãy ưu tiên cung cấp thông tin về tình trạng tổng thể kho tri thức, rủi ro thiếu hụt tài liệu, "
+        "và các giảng viên cần hỗ trợ thêm."
+    ),
+    "lecturer": (
+        "Bạn là trợ lý giảng viên trong hệ thống EduVault. "
+        "Người dùng có thể upload tài liệu lên chuyên ngành của mình, tìm kiếm tài liệu công khai, "
+        "xem và chỉnh sửa tài liệu của bản thân, theo dõi yêu cầu chuyển giao. "
+        "Hãy tập trung vào việc giúp tìm tài liệu liên quan đến môn học của họ và hướng dẫn quản lý tài liệu cá nhân."
+    ),
+    "new_lecturer": (
+        "Bạn là trợ lý hỗ trợ giảng viên mới trong hệ thống EduVault. "
+        "Người dùng vừa được phân công và cần làm quen với hệ thống. "
+        "Họ chỉ có thể xem tài liệu công khai và upload tài liệu cá nhân. "
+        "Hãy hướng dẫn từng bước rõ ràng, giải thích ý nghĩa của các tính năng, "
+        "và khuyến khích họ bắt đầu bằng cách upload tài liệu đầu tiên."
+    ),
+}
+
+_SUGGESTED_ACTIONS_BY_INTENT: dict[str, dict[str, list[dict]]] = {
+    "upload_help": {
+        "default": [{"label": "Tải lên tài liệu", "route": "/repository", "action": "open_upload"}],
+    },
+    "own_document_lookup": {
+        "default": [{"label": "Xem tài liệu của tôi", "route": "/repository"}],
+    },
+    "knowledge_gap_analysis": {
+        "head": [{"label": "Xem báo cáo khoảng trống", "route": "/knowledge-transfer"}],
+        "admin": [{"label": "Xem báo cáo khoảng trống", "route": "/knowledge-transfer"}],
+    },
+    "user_management": {
+        "admin": [{"label": "Quản lý giảng viên", "route": "/lecturers"}],
+    },
+    "policy_management": {
+        "admin": [{"label": "Cấu hình policy", "route": "/policy"}],
+        "head": [{"label": "Cấu hình policy", "route": "/policy"}],
+    },
+    "analytics_query": {
+        "admin": [{"label": "Xem thống kê", "route": "/"}],
+        "head": [{"label": "Xem thống kê", "route": "/"}],
+    },
+    "knowledge_transfer": {
+        "head": [{"label": "Quản lý chuyển giao", "route": "/knowledge-transfer"}],
+        "admin": [{"label": "Quản lý chuyển giao", "route": "/knowledge-transfer"}],
+        "lecturer": [{"label": "Xem yêu cầu chuyển giao", "route": "/knowledge-transfer"}],
+    },
+    "topic_search": {
+        "default": [
+            {"label": "Tìm kiếm tài liệu", "route": "/search"},
+            {"label": "Xem kho tài liệu", "route": "/repository"},
+        ],
+    },
+    "question_answer": {
+        "default": [{"label": "Tìm kiếm nâng cao", "route": "/search"}],
+    },
+    "onboarding_guide": {
+        "new_lecturer": [
+            {"label": "Tải lên tài liệu đầu tiên", "route": "/repository", "action": "open_upload"},
+            {"label": "Tìm kiếm tài liệu", "route": "/search"},
+        ],
+    },
+}
+
+
+def _suggested_actions_for(intent_label: str, role: str) -> list[dict]:
+    mapping = _SUGGESTED_ACTIONS_BY_INTENT.get(intent_label, {})
+    return mapping.get(role) or mapping.get("default") or []
+
+
+def build_role_context(db, user: dict) -> str:
+    """Build a short context block describing the current user's role and data, injected into the LLM prompt."""
+    role = user.get("role", "lecturer")
+    name = user.get("name") or user.get("code", "")
+    lines = [f"Vai trò: {role}", f"Mã người dùng: {user.get('code', '')}"]
+    if name:
+        lines.append(f"Tên: {name}")
+    try:
+        if role in ("lecturer", "new_lecturer"):
+            specs = user_specializations(db, user)
+            if specs:
+                spec_names = ", ".join(s.get("name", s.get("code", "")) for s in specs)
+                lines.append(f"Chuyên ngành phụ trách: {spec_names}")
+            doc_count = db.execute(
+                "SELECT COUNT(*) as cnt FROM documents WHERE owner_code=? AND deleted_at IS NULL",
+                (user["code"],),
+            ).fetchone()
+            if doc_count:
+                lines.append(f"Số tài liệu đã upload: {doc_count['cnt']}")
+        elif role in ("head", "admin"):
+            total_docs = db.execute(
+                "SELECT COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL",
+                (),
+            ).fetchone()
+            if total_docs:
+                lines.append(f"Tổng tài liệu trong hệ thống: {total_docs['cnt']}")
+            lecturer_count = db.execute(
+                "SELECT COUNT(*) as cnt FROM users WHERE role IN ('lecturer','new_lecturer') AND deleted_at IS NULL",
+                (),
+            ).fetchone()
+            if lecturer_count:
+                lines.append(f"Số giảng viên: {lecturer_count['cnt']}")
+    except Exception:
+        pass
+    return "\n".join(lines)
 
 
 def is_location_query(question: str) -> bool:
@@ -3947,7 +4101,7 @@ def is_insufficient_response(answer: str) -> bool:
     return any(p in lowered for p in phrases)
 
 
-def clean_answer_instructions(instructions: str | None) -> str:
+def clean_answer_instructions(instructions: str | None, role: str | None = None, role_context: str | None = None) -> str:
     text = instructions or ""
     blocked_phrases = (
         "Nêu tên tài liệu nguồn",
@@ -3964,13 +4118,29 @@ def clean_answer_instructions(instructions: str | None) -> str:
         "Không viết mục nguồn trong thân câu trả lời vì giao diện đã hiển thị nguồn riêng. "
         "Không tự thêm mục gợi ý học tập hoặc câu hỏi tiếp theo."
     )
-    return f"{text}\n{guardrail}".strip()
+    role_prompt = ROLE_SYSTEM_PROMPTS.get(role or "", "") if role else ""
+    parts = [p for p in [role_prompt, role_context, text, guardrail] if p]
+    return "\n\n".join(parts).strip()
 
 
-def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
+def _extract_actual_question(text: str) -> str:
+    """Extract the clean user question from a context-injected question string."""
+    marker = "Câu hỏi của người dùng:"
+    if marker in text:
+        return text.split(marker)[-1].strip()
+    return text.strip()
+
+
+def ask(db, user: dict, question: str, filters: dict | None = None, current_page: str | None = None) -> dict:
+    # Use clean question for retrieval; keep full string (with memory/context) for LLM
+    retrieval_query = _extract_actual_question(question)
+    role = user.get("role", "lecturer")
+    role_ctx = build_role_context(db, user)
+    if current_page:
+        role_ctx += f"\nTrang hiện tại: {current_page}"
     allowed = {document["id"]: document for document in rag_documents(db, user)}
     config = search_policy(db)
-    rewritten_query = rewrite_query(question)
+    rewritten_query = rewrite_query(retrieval_query)
     sub_queries = decompose_query(rewritten_query, config)
     expanded_terms = expanded_query_terms(" ".join(sub_queries), config)
     intent = {**_query_intent(rewritten_query), **classify_query_intent(rewritten_query)}
@@ -4070,16 +4240,24 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
     ]
     candidates = merge_ranked_matches(candidates)[: int(config.get("rerank_k", 5))]
     filtered = [(score, document, content) for score, document, content in candidates if _matches_query_intent(document, content, intent)]
+    # For topic/course-prep searches, deprioritise non-teaching doc types (CV, misc files)
+    _NON_TEACHING_TYPES = {"tài liệu khác", "tai lieu khac", "cv", "hồ sơ", "ho so"}
+    if intent["label"] in ("topic_search", "document_lookup", "own_document_lookup"):
+        filtered_teaching = [
+            item for item in filtered
+            if strip_accents(str(item[1].get("doc_type") or "")).casefold() not in _NON_TEACHING_TYPES
+        ]
+        filtered = filtered_teaching if filtered_teaching else filtered
     if filtered:
         top_score = filtered[0][0]
-        threshold = max(float(config.get("confidence_threshold", 1.0)), top_score * 0.35)
+        threshold = max(float(config.get("confidence_threshold", 0.3)), top_score * 0.35)
         matches = [item for item in filtered if item[0] >= threshold][:3]
     elif intent["wants_books"] or intent["wants_exam"] or intent["wants_ai"]:
         matches = []
     else:
         matches = scored[:3]
     trace = {
-        "original_query": question,
+        "original_query": retrieval_query,
         "rewritten_query": rewritten_query,
         "expanded_terms": expanded_terms,
         "sub_queries": sub_queries,
@@ -4091,9 +4269,9 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
     trace_id = f"trace-{uuid.uuid4().hex[:12]}"
     db.execute(
         "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
-        (trace_id, user["code"], question, rewritten_query, intent["label"], json.dumps(trace["retrieved"], ensure_ascii=False), json.dumps(trace["reranked"], ensure_ascii=False), now()),
+        (trace_id, user["code"], retrieval_query, rewritten_query, intent["label"], json.dumps(trace["retrieved"], ensure_ascii=False), json.dumps(trace["reranked"], ensure_ascii=False), now()),
     )
-    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": question, "matches": len(matches), "scope": "public_or_owned", "intent": intent["label"]})
+    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": retrieval_query, "matches": len(matches), "scope": "public_or_owned", "intent": intent["label"]})
     
     if not matches:
         not_indexed_docs = rows(db.execute(
@@ -4149,6 +4327,7 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
             "trace_id": trace_id,
             "trace": trace,
             "verification": {"status": "insufficient_evidence", "message": "Không đủ căn cứ từ tài liệu được phép truy cập."},
+            "suggested_actions": _suggested_actions_for(intent["label"], role),
         }
 
     if intent["label"] == "document_location":
@@ -4157,7 +4336,7 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
         answer = format_document_location_answer(selected_match[1])
         top_score = selected_match[0] if selected_match else 0
         verification = {
-            "status": "grounded" if top_score >= float(config.get("confidence_threshold", 1.0)) else "weak_evidence",
+            "status": "grounded" if top_score >= float(config.get("confidence_threshold", 0.3)) else "weak_evidence",
             "message": "Cau tra loi lay truc tiep tu metadata tai lieu.",
         }
         return {
@@ -4170,11 +4349,29 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
             "trace": trace,
             "verification": verification,
             "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "metadata_answer", "cite", "verify"],
+            "suggested_actions": _suggested_actions_for(intent["label"], role),
         }
 
+    # For topic_search, use structured answer directly without LLM (faster + no hallucination)
+    if intent["label"] == "topic_search":
+        structured = format_topic_search_answer(question, matches)
+        if structured:
+            top_score = matches[0][0] if matches else 0
+            return {
+                "answer": structured,
+                "citations": [citation_for(score, d, content) for score, d, content in matches],
+                "scope": "public_or_owned",
+                "intent": intent["label"],
+                "rewritten_query": rewritten_query,
+                "trace_id": trace_id,
+                "trace": trace,
+                "verification": {"status": "grounded", "message": "Tổng hợp từ tài liệu trong kho."},
+                "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "structured_answer"],
+                "suggested_actions": _suggested_actions_for(intent["label"], role),
+            }
     fallback = conversational_fallback(question, matches)
     prompts = policy_value(db, "ai_prompts", {})
-    answer = ai_provider.answer(question, [document_metadata_context(document, content) for _, document, content in matches], fallback, clean_answer_instructions(prompts.get("answer_instructions")))
+    answer = ai_provider.answer(question, [document_metadata_context(document, content) for _, document, content in matches], fallback, clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_context=role_ctx))
     
     ocr_failed_matches = []
     for score, doc, content in matches:
@@ -4236,7 +4433,36 @@ def ask(db, user: dict, question: str, filters: dict | None = None) -> dict:
         "trace": trace,
         "verification": verification,
         "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "compress", "ground", "cite", "verify"],
+        "suggested_actions": _suggested_actions_for(intent["label"], role),
     }
+
+
+def format_topic_search_answer(question: str, matches: list[tuple]) -> str | None:
+    """Structured answer for topic_search: group by doc_type, note what's missing."""
+    if not matches:
+        return None
+    _TEACHING_ORDER = ["Đề cương", "Bài giảng", "Slide", "Tài liệu tham khảo", "Đề thi", "Bài tập lớn", "Nghiên cứu khoa học", "Học liệu"]
+    by_type: dict[str, list[str]] = {}
+    for _, doc, _ in matches:
+        dt = doc.get("doc_type") or "Khác"
+        by_type.setdefault(dt, []).append(doc.get("title", ""))
+    lines = ["Tài liệu hiện có trong kho liên quan đến yêu cầu của bạn:\n"]
+    for dt in _TEACHING_ORDER:
+        if dt in by_type:
+            lines.append(f"**{dt}:**")
+            for title in by_type[dt]:
+                lines.append(f"- {title}")
+    for dt, titles in by_type.items():
+        if dt not in _TEACHING_ORDER:
+            lines.append(f"**{dt}:**")
+            for title in titles:
+                lines.append(f"- {title}")
+    # Suggest missing types
+    present = set(by_type.keys())
+    missing = [t for t in ["Đề cương", "Bài giảng", "Đề thi"] if not any(t.lower() in p.lower() for p in present)]
+    if missing:
+        lines.append(f"\n⚠️ **Chưa có:** {', '.join(missing)} — bạn có thể upload thêm để đầy đủ hơn.")
+    return "\n".join(lines)
 
 
 def conversational_fallback(question: str, matches: list[tuple]) -> str:
@@ -4262,9 +4488,17 @@ def ensure_conversational_format(answer: str, question: str) -> str:
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip()
-    for marker in ("\n### G", "\n### B", "\n## G", "\n## B"):
-        if marker in stripped:
-            stripped = stripped.split(marker, 1)[0].strip()
+    # Only cut known trailing filler sections, not all headings starting with G/B
+    trailing_patterns = [
+        r"\n#{1,3}\s*Gợi ý câu hỏi",
+        r"\n#{1,3}\s*Gợi ý tiếp theo",
+        r"\n#{1,3}\s*Câu hỏi liên quan",
+        r"\n#{1,3}\s*Bổ sung thêm",
+        r"\n#{1,3}\s*Tham khảo thêm",
+        r"\n#{1,3}\s*Lưu ý thêm",
+    ]
+    for pattern in trailing_patterns:
+        stripped = re.split(pattern, stripped, maxsplit=1, flags=re.IGNORECASE)[0].strip()
     if stripped:
         return stripped
     return "Mình chưa có đủ thông tin từ tài liệu được phép truy cập để trả lời chắc chắn câu hỏi này."
