@@ -20,6 +20,7 @@ from xml.etree import ElementTree
 
 from .ai import ai_provider
 from .database import BACKUP_DIR, STORAGE_DIR, database_backend, hash_secret, now, restore_database, rows, snapshot_database, map_document_type_to_standard_folder
+from . import agent as _agent_module
 from .infrastructure import delete_object, delete_vectors, infrastructure_status, publish_event, qdrant_enabled, search_vectors, store_object, upsert_vector
 
 
@@ -4593,14 +4594,9 @@ def _build_rag_response(db, user: dict, question: str, retrieval_query: str,
 
 def ask(db, user: dict, question: str, filters: dict | None = None, current_page: str | None = None) -> dict:
     """Entry point — delegates to the LangGraph multi-agent pipeline."""
-    import sys as _sys, importlib as _il
-    _svc_mod = _sys.modules[__name__]
-    # Derive agent module path from current package (works for both eduvault.* and src.eduvault.*)
-    _pkg = __name__.rsplit(".", 1)[0]
-    _agent_mod = _il.import_module(f"{_pkg}.agent")
-    _run_agent = _agent_mod.run_agent
-    return _run_agent(
-        services_module=_svc_mod,
+    import sys as _sys
+    return _agent_module.run_agent(
+        services_module=_sys.modules[__name__],
         db=db, user=user, question=question, filters=filters, current_page=current_page,
     )
 

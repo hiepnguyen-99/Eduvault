@@ -499,9 +499,9 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
           {messages.map((item, index) => <div key={index} className="space-y-4">
             <div className="ml-auto max-w-[82%] rounded-xl rounded-tr-sm bg-blue-600 p-4 text-sm text-white">{item.question}</div>
             <div className="max-w-[95%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-5 text-sm">
-              <div className="mb-4 flex items-center gap-2 font-bold text-blue-600">
-                <Sparkles size={16}/>
-                {item.streaming ? item.status || "Đang trả lời..." : intentTitle(item.result.intent, item.streaming)}
+              <div className="mb-3 flex items-center gap-2 text-blue-600">
+                <Sparkles size={15}/>
+                {item.streaming && <span className="text-xs font-medium">{item.status || "Đang trả lời..."}</span>}
               </div>
               {item.result.answer ? <div><FriendlyAnswer answer={item.result.answer}/>{item.streaming && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-blue-600 align-middle"/>}</div> : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>}
               {!item.streaming && <Sources citations={item.result.citations} onPreview={openPreview}/>}
