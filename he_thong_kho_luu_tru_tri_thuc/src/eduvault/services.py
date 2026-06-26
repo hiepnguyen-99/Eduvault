@@ -3776,6 +3776,10 @@ def query_words(queries: list[str]) -> set[str]:
 
 def classify_query_intent(question: str) -> dict:
     folded = strip_accents(question).casefold()
+    # Greeting / chitchat — check first, short-circuit
+    _greeting_exact = {"xin chao", "chao", "hello", "hi", "hey", "chao ban", "chao tro ly", "chao ai"}
+    if folded.strip() in _greeting_exact or any(folded.startswith(g) for g in ("xin chao", "chao ban", "hello ", "hi ")):
+        return {"label": "greeting", "confidence": 1.0}
     # Thống kê / báo cáo — check trước upload_help vì "bao cao tai len" sẽ nhầm upload
     # Loại trừ các tên môn học có chứa "thong ke" (xac suat thong ke, thong ke ung dung, ...)
     _analytics_tokens = ("bao cao", "phan tich so lieu", "so sanh giang vien", "xu huong", "bieu do", "analytics", "dashboard", "so lieu", "hoat dong tai len")
@@ -4443,7 +4447,7 @@ def _build_system_response(db, user: dict, question: str, retrieval_query: str,
         answer = ai_provider.answer(
             question, [],
             fallback_text,
-            clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_ctx=role_ctx) + "\n" + system_instructions,
+            clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_context=role_ctx) + "\n" + system_instructions,
         )
         if not answer or is_insufficient_response(answer):
             answer = fallback_text
@@ -4589,9 +4593,14 @@ def _build_rag_response(db, user: dict, question: str, retrieval_query: str,
 
 def ask(db, user: dict, question: str, filters: dict | None = None, current_page: str | None = None) -> dict:
     """Entry point — delegates to the LangGraph multi-agent pipeline."""
-    from eduvault.agent import run_agent
-    return run_agent(
-        services_module=__import__("eduvault.services", fromlist=["services"]),
+    import sys as _sys, importlib as _il
+    _svc_mod = _sys.modules[__name__]
+    # Derive agent module path from current package (works for both eduvault.* and src.eduvault.*)
+    _pkg = __name__.rsplit(".", 1)[0]
+    _agent_mod = _il.import_module(f"{_pkg}.agent")
+    _run_agent = _agent_mod.run_agent
+    return _run_agent(
+        services_module=_svc_mod,
         db=db, user=user, question=question, filters=filters, current_page=current_page,
     )
 
