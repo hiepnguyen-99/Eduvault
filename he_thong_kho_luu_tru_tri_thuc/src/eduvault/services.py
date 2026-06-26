@@ -3788,7 +3788,7 @@ def classify_query_intent(question: str) -> dict:
     if any(token in folded for token in _analytics_tokens) or ("thong ke" in folded and not _thong_ke_subject):
         label = "analytics_query"
     # Tài liệu của chính mình — check trước upload_help vì "da upload" sẽ nhầm upload_help
-    elif any(token in folded for token in ("tai lieu cua toi", "file cua toi", "cua minh", "toi da tai", "da upload", "ban than minh", "cua ban than", "toi da up", "nhung file nao")):
+    elif any(token in folded for token in ("tai lieu cua toi", "file cua toi", "cua minh", "toi da tai", "da upload", "ban than minh", "cua ban than", "toi da up", "nhung file nao", "toi da day len", "da day len", "minh da dang", "tai lieu minh", "danh sach tai lieu", "xem tai lieu", "check tai lieu", "kiem tra tai lieu", "liet ke tai lieu")):
         label = "own_document_lookup"
     # Chuyển giao tri thức — check trước upload_help
     elif any(token in folded for token in ("chuyen giao", "ban giao", "ke thua", "tiep nhan", "handover", "transfer", "nguoi thay the")):
@@ -4461,6 +4461,113 @@ def _build_system_response(db, user: dict, question: str, retrieval_query: str,
         "verification": {"status": "system_knowledge"},
         "suggested_actions": _suggested_actions_for(intent, role),
         "pipeline": ["router", "system_agent"],
+    }
+
+
+def _build_action_response(db, user: dict, retrieval_query: str, intent: str, role: str) -> dict:
+    """DB-backed action agent: actually executes queries instead of just explaining how to."""
+    trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+    db.execute(
+        "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (trace_id, user["code"], retrieval_query, retrieval_query, intent, "[]", "[]", now()),
+    )
+    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": retrieval_query, "matches": 0, "scope": "public_or_owned", "intent": intent})
+
+    if intent == "own_document_lookup":
+        owned = rows(db.execute(
+            "SELECT title, doc_type, topic, visibility, status, created_at FROM documents "
+            "WHERE owner_code=? AND deleted_at IS NULL ORDER BY created_at DESC",
+            (user["code"],)
+        ).fetchall())
+        if not owned:
+            answer = "Bạn chưa tải lên tài liệu nào trong hệ thống EduVault."
+        else:
+            lines = [f"Bạn có **{len(owned)} tài liệu** trong kho:\n"]
+            for i, doc in enumerate(owned, 1):
+                vis = "🔓 Public" if doc.get("visibility") == "public" else "🔒 Private"
+                status = doc.get("status", "")
+                status_label = "✅ Đã lập chỉ mục" if status == "INDEXED" else f"⏳ {status}"
+                lines.append(
+                    f"**{i}. {doc.get('title','')}**\n"
+                    f"   📂 {doc.get('topic','')} · {doc.get('doc_type','')} · {vis} · {status_label}"
+                )
+            answer = "\n".join(lines)
+
+    elif intent == "analytics_query":
+        if role not in ("admin", "head"):
+            # For lecturers: show their own stats
+            owned = rows(db.execute(
+                "SELECT doc_type, COUNT(*) as cnt FROM documents WHERE owner_code=? AND deleted_at IS NULL GROUP BY doc_type",
+                (user["code"],)
+            ).fetchall())
+            total = db.execute("SELECT COUNT(*) as n FROM documents WHERE owner_code=? AND deleted_at IS NULL", (user["code"],)).fetchone()
+            total_n = total["n"] if total else 0
+            if not owned:
+                answer = "Bạn chưa có tài liệu nào trong kho."
+            else:
+                lines = [f"**Thống kê tài liệu của bạn** ({total_n} tài liệu):\n"]
+                for row in owned:
+                    lines.append(f"• {row.get('doc_type','Khác')}: **{row.get('cnt',0)}** tài liệu")
+                answer = "\n".join(lines)
+        else:
+            # Admin/head: show full system stats
+            total = db.execute("SELECT COUNT(*) as n FROM documents WHERE deleted_at IS NULL").fetchone()
+            by_type = rows(db.execute("SELECT doc_type, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL GROUP BY doc_type ORDER BY cnt DESC LIMIT 8").fetchall())
+            by_topic = rows(db.execute("SELECT topic, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL GROUP BY topic ORDER BY cnt DESC LIMIT 6").fetchall())
+            indexed = db.execute("SELECT COUNT(*) as n FROM documents WHERE deleted_at IS NULL AND status='INDEXED'").fetchone()
+            total_n = total["n"] if total else 0
+            indexed_n = indexed["n"] if indexed else 0
+            lines = [f"**Thống kê kho tri thức** — {total_n} tài liệu ({indexed_n} đã lập chỉ mục)\n"]
+            if by_type:
+                lines.append("**Theo loại:**")
+                for row in by_type:
+                    lines.append(f"• {row.get('doc_type','Khác')}: {row.get('cnt',0)}")
+            if by_topic:
+                lines.append("\n**Theo chủ đề:**")
+                for row in by_topic:
+                    lines.append(f"• {row.get('topic','')}: {row.get('cnt',0)}")
+            answer = "\n".join(lines)
+
+    elif intent == "knowledge_gap_analysis":
+        # Topics with fewer than 3 docs
+        by_topic = rows(db.execute(
+            "SELECT topic, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL AND status='INDEXED' GROUP BY topic ORDER BY cnt ASC"
+        ).fetchall())
+        weak = [r for r in by_topic if r.get("cnt", 0) < 3]
+        if not weak:
+            answer = "Kho tri thức hiện tại khá đầy đủ — không phát hiện chủ đề nào có ít hơn 3 tài liệu."
+        else:
+            lines = [f"**Phát hiện {len(weak)} chủ đề còn thiếu tài liệu** (< 3 tài liệu):\n"]
+            for row in weak:
+                lines.append(f"• **{row.get('topic','')}**: chỉ có {row.get('cnt',0)} tài liệu")
+            lines.append("\n💡 Gợi ý: Tải thêm đề cương, bài giảng, hoặc tài liệu tham khảo cho các chủ đề trên.")
+            answer = "\n".join(lines)
+
+    elif intent == "version_management":
+        recent = rows(db.execute(
+            "SELECT d.title, v.version_number, v.created_at FROM versions v "
+            "JOIN documents d ON d.id=v.document_id "
+            "WHERE d.owner_code=? AND d.deleted_at IS NULL ORDER BY v.created_at DESC LIMIT 10",
+            (user["code"],)
+        ).fetchall())
+        if not recent:
+            answer = "Chưa có lịch sử phiên bản nào cho tài liệu của bạn."
+        else:
+            lines = ["**Lịch sử phiên bản tài liệu của bạn:**\n"]
+            for v in recent:
+                lines.append(f"• {v.get('title','')} — v{v.get('version_number','')} ({format_date_vietnamese(v.get('created_at',''))})")
+            answer = "\n".join(lines)
+
+    else:
+        answer = "Mình chưa hỗ trợ thao tác này. Hãy thử hỏi cụ thể hơn về tài liệu hoặc hệ thống."
+
+    return {
+        "answer": answer, "citations": [], "intent": intent,
+        "trace_id": trace_id,
+        "trace": {"original_query": retrieval_query, "intent": {"label": intent}},
+        "verification": {"status": "db_action", "message": "Kết quả lấy trực tiếp từ dữ liệu hệ thống."},
+        "suggested_actions": _suggested_actions_for(intent, role),
+        "pipeline": ["router", "action_agent"],
     }
 
 

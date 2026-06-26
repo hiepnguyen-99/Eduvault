@@ -39,7 +39,7 @@ class ChatState(TypedDict):
     # ---- set in router ----
     intent: str
     intent_meta: dict        # full intent dict from classify_query_intent
-    agent_route: Literal["rag", "system", "out_of_scope", "conversational"]
+    agent_route: Literal["rag", "system", "action", "out_of_scope", "conversational"]
     oos_reason: str | None
 
     # ---- set in retrieve / rerank ----
@@ -106,6 +106,11 @@ _SYSTEM_INTENTS = {
     "upload_help", "policy_management", "user_management",
     "system_status", "onboarding_guide", "permission_request",
 }
+# Intents that need direct DB queries, not RAG
+_ACTION_INTENTS = {
+    "own_document_lookup", "analytics_query",
+    "knowledge_gap_analysis", "version_management",
+}
 _CONVERSATIONAL_INTENTS = {"greeting", "chitchat"}
 
 
@@ -128,7 +133,9 @@ def router(state: ChatState) -> dict:
     label: str = intent_meta.get("label", "document_lookup")
 
     if label in _SYSTEM_INTENTS:
-        route: Literal["rag", "system", "out_of_scope", "conversational"] = "system"
+        route: Literal["rag", "system", "action", "out_of_scope", "conversational"] = "system"
+    elif label in _ACTION_INTENTS:
+        route = "action"
     elif label in _CONVERSATIONAL_INTENTS:
         route = "conversational"
     else:
@@ -248,6 +255,20 @@ def system_answer(state: ChatState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: action_answer  (DB-backed: list docs, stats, versions, gaps)
+# ---------------------------------------------------------------------------
+
+def action_answer(state: ChatState) -> dict:
+    svc = _s()
+    result = svc._build_action_response(
+        db=state["db"], user=state["user"],
+        retrieval_query=state["retrieval_query"],
+        intent=state["intent"], role=state["role"],
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Node: oos_answer
 # ---------------------------------------------------------------------------
 
@@ -320,6 +341,7 @@ def build_agent(services_module: Any) -> Any:
     graph.add_node("rerank", rerank)
     graph.add_node("rag_answer", rag_answer)
     graph.add_node("system_answer", system_answer)
+    graph.add_node("action_answer", action_answer)
     graph.add_node("oos_answer", oos_answer)
     graph.add_node("conversational_answer", conversational_answer)
     graph.add_node("memory_update", memory_update)
@@ -330,6 +352,7 @@ def build_agent(services_module: Any) -> Any:
     graph.add_conditional_edges("router", _route_decision, {
         "rag": "retrieve",
         "system": "system_answer",
+        "action": "action_answer",
         "out_of_scope": "oos_answer",
         "conversational": "conversational_answer",
     })
@@ -338,6 +361,7 @@ def build_agent(services_module: Any) -> Any:
     graph.add_edge("rerank", "rag_answer")
     graph.add_edge("rag_answer", "memory_update")
     graph.add_edge("system_answer", "memory_update")
+    graph.add_edge("action_answer", "memory_update")
     graph.add_edge("oos_answer", "memory_update")
     graph.add_edge("conversational_answer", "memory_update")
     graph.add_edge("memory_update", END)
@@ -372,7 +396,7 @@ def run_agent(services_module: Any, db: Any, user: dict, question: str,
         "long_term": [],
         "intent": "",
         "intent_meta": {},
-        "agent_route": "rag",
+        "agent_route": "rag",  # type: ignore[assignment]
         "oos_reason": None,
         "candidates": [],
         "matches": [],
