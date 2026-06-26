@@ -588,8 +588,12 @@ async def analyze_file(request: Request, x_filename: str = Header(), user: dict 
         metadata = guess_metadata(filename, content, prompts.get("metadata_instructions"))
         duplicate = db.execute("SELECT id,title FROM documents WHERE content_hash=?", (hash_secret(content.strip()),)).fetchone()
         folder_path = suggest_folder(db, user, {**metadata, "visibility": "public"})
+        upload_suggestion = suggest_upload_destination(db, user, filename, content)
     return {
-        "metadata": metadata, "folder_path": folder_path, "duplicate": dict(duplicate) if duplicate else None,
+        "metadata": metadata,
+        "folder_path": upload_suggestion.get("folder_path") or folder_path,
+        "folder_node_id": upload_suggestion.get("folder_node_id"),
+        "duplicate": dict(duplicate) if duplicate else None,
         "content_preview": content[:5000], "ai": ai_provider.status(),
     }
 
@@ -598,6 +602,34 @@ async def analyze_file(request: Request, x_filename: str = Header(), user: dict 
 def folder_suggestion(payload: DocumentInput, user: dict = Depends(current_user)):
     with connection() as db:
         return {"folder_path": suggest_folder(db, user, payload.model_dump())}
+
+
+class FolderSuggestCoursePayload(BaseModel):
+    description: str
+
+
+@app.post("/api/folders/suggest-course")
+def folder_suggest_course(payload: FolderSuggestCoursePayload, user: dict = Depends(current_user)):
+    with connection() as db:
+        suggestion = suggest_upload_destination(db, dict(user), "", payload.description)
+    return suggestion
+
+
+class FolderCreateRequestPayload(BaseModel):
+    folder_name: str
+    parent_path: str = ""
+    reason: str = ""
+
+
+@app.post("/api/folders/request-create")
+def folder_request_create(payload: FolderCreateRequestPayload, user: dict = Depends(current_user)):
+    with transaction() as db:
+        audit(db, user["code"], "folder.request_create", "folder", payload.folder_name, {
+            "folder_name": payload.folder_name,
+            "parent_path": payload.parent_path,
+            "reason": payload.reason,
+        })
+    return {"status": "ok", "message": "Yêu cầu tạo thư mục đã được gửi đến admin duyệt."}
 
 
 @app.get("/api/folders/tree")
@@ -1223,10 +1255,12 @@ def save_upload_task_fast(task_id: str) -> str:
             "visibility": metadata["visibility"],
         }
         folder_path = metadata.get("folder_path") or suggestion.get("folder_path") or suggest_folder(db, dict(user), applied_metadata)
+        ai_folder_node_id = suggestion.get("folder_node_id") or metadata.get("folder_node_id")
         task_metadata = {
             **metadata,
             "quick_suggestion": suggestion,
             "ai_metadata": ai_metadata,
+            "folder_node_id": ai_folder_node_id,
             "applied_metadata": {**applied_metadata, "folder_path": folder_path},
         }
         db.execute(
@@ -1236,7 +1270,7 @@ def save_upload_task_fast(task_id: str) -> str:
         payload = {
             **applied_metadata,
             "folder_path": folder_path,
-            "folder_node_id": metadata.get("folder_node_id"),
+            "folder_node_id": ai_folder_node_id,
             "content": f"File: {task['filename']}\nStatus: UPLOADED. AI processing is running asynchronously.\n\n{preview[:4000]}",
         }
         existing_id = metadata.get("existing_document_id")

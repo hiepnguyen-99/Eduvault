@@ -67,6 +67,12 @@ export default function Repository() {
     {role:"assistant",content:"Nếu AI chưa tìm được nơi lưu phù hợp, hãy mô tả tài liệu cần lưu vào học phần/folder nào. Mình chỉ chọn trong nhánh bạn có quyền; yêu cầu tạo ngành/học phần mới sẽ gửi admin duyệt."},
   ]);
   const [destinationChatBusy,setDestinationChatBusy]=useState(false);
+  const [aiPanelPrompt,setAiPanelPrompt]=useState("");
+  const [aiPanelBusy,setAiPanelBusy]=useState(false);
+  const [newFolderName,setNewFolderName]=useState("");
+  const [newFolderParent,setNewFolderParent]=useState("");
+  const [folderRequestBusy,setFolderRequestBusy]=useState(false);
+  const [folderRequestSent,setFolderRequestSent]=useState(false);
   const [documentTypeTouched,setDocumentTypeTouched]=useState(false);
   const [autoAnalyzing,setAutoAnalyzing]=useState(false);
   const [form,setForm]=useState<DocumentForm>(emptyForm);
@@ -252,7 +258,38 @@ export default function Repository() {
     setDestinationChatInput("");
     setDestinationChatMessages(current=>[...current,{role:"user",content:text}]);
     const normalized=normalizeSearch(text);
-    const asksForPolicyChange=/(tao|them|bo sung|cap nhat|de xuat|yeu cau).*(nganh|chuyen nganh|nhom chuyen mon|hoc phan|mon|cap 2|policy)/.test(normalized);
+
+    // Detect "create folder" intent — broader pattern covering "tạo thư mục", "thêm thư mục", "tạo folder", etc.
+    const asksCreateFolder=/(tao|them|tao moi|tao them).*(thu muc|folder|nhanh|cap|hon)|(thu muc|folder).*(moi|them|chua co)/.test(normalized);
+    const asksForPolicyChange=asksCreateFolder||/(tao|them|bo sung|cap nhat|de xuat|yeu cau).*(nganh|chuyen nganh|nhom chuyen mon|hoc phan|mon|cap 2|policy)/.test(normalized);
+
+    if(asksCreateFolder){
+      // Extract folder name from message — look for quoted name or words after "là", "tên", "con là"
+      const nameMatch=text.match(/(?:là|tên|tên là|con là|folder|thư mục con là|thư mục)\s+([A-Za-z0-9À-ỹ\s]+?)(?:\s+(?:trong|thuộc|ở|của|để|cho)|$)/i);
+      const folderName=nameMatch?nameMatch[1].trim():"";
+      // Extract parent context
+      const parentMatch=text.match(/(?:trong|thuộc|ở|của)\s+([A-Za-z0-9À-ỹ\s()\-]+?)(?:\s+(?:để|cho|lưu)|$)/i);
+      const parentHint=parentMatch?parentMatch[1].trim():"";
+      setDestinationChatBusy(true);
+      try{
+        await request("/api/folders/request-create",{method:"POST",body:JSON.stringify({folder_name:folderName||text.slice(0,60),parent_path:parentHint,reason:text})});
+        // Also try to find the closest existing path to use as temp destination
+        const match=findDestinationMatch(text);
+        let tempPath=finalDestination.path||"";
+        if(match){
+          const dest=applyDestinationOption(match.option,"manual",match.docType);
+          tempPath=dest.path;
+        }
+        const folderLabel=folderName?`"${folderName}"`:"thư mục mới";
+        setDestinationChatMessages(current=>[...current,{role:"assistant",content:`Đã gửi yêu cầu tạo ${folderLabel} tới admin duyệt.${tempPath?` Trong lúc chờ, mình đã đặt đường dẫn tạm: ${tempPath}. Bạn vẫn có thể tải lên ngay.`:""}`}]);
+      }catch(err){
+        setDestinationChatMessages(current=>[...current,{role:"assistant",content:err instanceof Error?err.message:"Không gửi được yêu cầu tạo thư mục."}]);
+      }finally{
+        setDestinationChatBusy(false);
+      }
+      return;
+    }
+
     const match=findDestinationMatch(text);
     if(match&&!asksForPolicyChange){
       const destination=applyDestinationOption(match.option,"manual",match.docType);
@@ -263,7 +300,7 @@ export default function Repository() {
     }
     if(match&&asksForPolicyChange){
       applyDestinationOption(match.option,"manual",match.docType);
-      setDestinationChatMessages(current=>[...current,{role:"assistant",content:`Mình tìm được nhánh đang có quyền và đã chọn tạm: ${match.option.path}. Nếu bạn vẫn muốn tạo ngành/học phần mới, mình sẽ gửi yêu cầu admin duyệt.`}]);
+      setDestinationChatMessages(current=>[...current,{role:"assistant",content:`Mình tìm được nhánh gần nhất và đã chọn tạm: ${match.option.path}. Yêu cầu tạo ngành/học phần mới đã được ghi nhận, admin sẽ duyệt sau.`}]);
       return;
     }
     if(asksForPolicyChange){
@@ -278,7 +315,22 @@ export default function Repository() {
       }
       return;
     }
-    setDestinationChatMessages(current=>[...current,{role:"assistant",content:"Mình chưa tìm thấy học phần/folder phù hợp trong nhánh bạn được phép. Hãy mô tả rõ tên học phần hoặc yêu cầu tạo nhánh mới để admin duyệt."}]);
+    // Last resort: try AI course suggestion
+    setDestinationChatBusy(true);
+    try{
+      const r=await request<{folder_node_id?:string;folder_path?:string;course?:string;confidence?:number}>("/api/folders/suggest-course",{method:"POST",body:JSON.stringify({description:text})});
+      if(r.folder_node_id||r.folder_path){
+        setMetadata(x=>({...x,folder_node_id:r.folder_node_id||x.folder_node_id,folder_path:r.folder_path||x.folder_path}));
+        setDestinationSource("ai");
+        setDestinationChatMessages(current=>[...current,{role:"assistant",content:`Mình đã tìm được nơi lưu phù hợp: ${r.folder_path||r.course}. Đã cập nhật vào ô AI đề xuất.`}]);
+      }else{
+        setDestinationChatMessages(current=>[...current,{role:"assistant",content:"Mình chưa tìm thấy học phần phù hợp. Hãy mô tả rõ tên học phần hoặc gõ \"tạo thư mục [tên]\" để gửi yêu cầu tới admin."}]);
+      }
+    }catch{
+      setDestinationChatMessages(current=>[...current,{role:"assistant",content:"Mình chưa tìm thấy học phần phù hợp. Hãy mô tả rõ tên học phần hoặc gõ \"tạo thư mục [tên]\" để gửi yêu cầu tới admin."}]);
+    }finally{
+      setDestinationChatBusy(false);
+    }
   }
 
   function applyAiSuggestion(){
@@ -346,7 +398,7 @@ export default function Repository() {
   async function analyzeFile(nextFile:File){
     setAutoAnalyzing(true);
     try{
-      const result=await request<{metadata:{title:string;topic:string;doc_type:string};folder_path:string}>("/api/documents/analyze-file",{
+      const result=await request<{metadata:{title:string;topic:string;doc_type:string};folder_path:string;folder_node_id?:string}>("/api/documents/analyze-file",{
         method:"POST",
         headers:{"x-filename":encodeURIComponent(nextFile.name),"content-type":nextFile.type||"application/octet-stream"},
         body:nextFile,
@@ -357,6 +409,7 @@ export default function Repository() {
         topic:result.metadata.topic||"",
         doc_type:result.metadata.doc_type||x.doc_type,
         folder_path:x.folder_path||result.folder_path||"",
+        folder_node_id:x.folder_node_id||result.folder_node_id||"",
       }));
       window.setTimeout(()=>autoSelectDestination(`${nextFile.name} ${result.metadata.title||""} ${result.metadata.topic||""} ${result.metadata.doc_type||""}`),0);
     }catch{
@@ -364,6 +417,29 @@ export default function Repository() {
     }finally{
       setAutoAnalyzing(false);
     }
+  }
+
+  async function submitAiPanelPrompt(){
+    if(!aiPanelPrompt.trim()||aiPanelBusy)return;
+    setAiPanelBusy(true);
+    try{
+      const r=await request<{folder_node_id?:string;folder_path?:string;course?:string;specialization?:string;confidence?:number}>("/api/folders/suggest-course",{method:"POST",body:JSON.stringify({description:aiPanelPrompt})});
+      if(r.folder_node_id||r.folder_path){
+        setMetadata(x=>({...x,folder_node_id:r.folder_node_id||x.folder_node_id,folder_path:r.folder_path||x.folder_path}));
+        setDestinationSource("ai");
+      }
+      setAiPanelPrompt("");
+    }catch{}finally{setAiPanelBusy(false);}
+  }
+
+  async function submitFolderRequest(){
+    if(!newFolderName.trim()||folderRequestBusy)return;
+    setFolderRequestBusy(true);
+    try{
+      await request("/api/folders/request-create",{method:"POST",body:JSON.stringify({folder_name:newFolderName,parent_path:newFolderParent,reason:"Yêu cầu từ trang tải lên"})});
+      setFolderRequestSent(true);
+      setNewFolderName("");setNewFolderParent("");
+    }catch{}finally{setFolderRequestBusy(false);}
   }
 
   function openCreate(){
@@ -460,7 +536,7 @@ export default function Repository() {
       </Panel>
     </div>
     {editorOpen&&<Modal onClose={()=>setEditorOpen(false)}><p className="eyebrow">{editing?"Chỉnh sửa tài liệu":"Tạo tài liệu thủ công"}</p><h2 className="page-title mt-1">{editing?"Cập nhật tài liệu":"Thêm tài liệu mới"}</h2><DocumentFields form={form} setForm={setForm}/>{message&&<p className="mt-3 rounded bg-amber-50 p-2 text-xs text-amber-800">{message}</p>}<div className="mt-5 flex justify-end gap-2"><button className="btn-secondary" onClick={()=>setEditorOpen(false)}>Hủy</button><button disabled={busy||!form.title||!form.topic||!form.content} className="btn-primary" onClick={saveDocument}>{busy&&<LoaderCircle className="animate-spin" size={15}/>}Lưu tài liệu</button></div></Modal>}
-    {uploadOpen&&<Modal onClose={()=>setUploadOpen(false)}><p className="eyebrow">Nhập tài liệu có hỗ trợ AI</p><h2 className="page-title mt-1">Tải tài liệu mới</h2><label className="mini-grid mt-5 block rounded-xl border-2 border-dashed border-blue-300 p-8 text-center"><Upload className="mx-auto text-blue-600"/><strong className="mt-3 block text-sm">{file?.name||"Chọn tệp để tải lên"}</strong>{file&&<span className="muted mt-1 block text-xs">{formatFileSize(file.size)} · tải theo chunk · AI xử lý nền · tối đa 250 MB</span>}<input type="file" className="hidden" disabled={launchedActive} onChange={e=>selectFile(e.target.files?.[0]||null)}/></label><div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="relative"><input className={`field w-full pr-8 ${autoAnalyzing?"opacity-60":""}`} placeholder={autoAnalyzing?"AI đang đọc tài liệu...":"Tên tài liệu"} value={metadata.title} disabled={autoAnalyzing} onChange={e=>{setMetadata(x=>({...x,title:e.target.value}));setUploadAsNew(false)}}/>{autoAnalyzing&&<LoaderCircle className="animate-spin absolute right-2.5 top-2.5 text-blue-500" size={14}/>}</div><div className="relative"><input className={`field w-full pr-8 ${autoAnalyzing?"opacity-60":""}`} placeholder={autoAnalyzing?"Đang phân tích...":"Chủ đề"} value={metadata.topic} disabled={autoAnalyzing} onChange={e=>setMetadata(x=>({...x,topic:e.target.value}))}/>{autoAnalyzing&&<LoaderCircle className="animate-spin absolute right-2.5 top-2.5 text-blue-500" size={14}/>}</div><select className="field" value={metadata.doc_type} disabled={autoAnalyzing} onChange={e=>{setDocumentTypeTouched(true);setMetadata(x=>({...x,doc_type:e.target.value}))}}>{DOCUMENT_TYPES.map(type=><option key={type} value={type}>{type}</option>)}</select><select className="field" value={metadata.visibility} onChange={e=>setMetadata(x=>({...x,visibility:e.target.value as "public"|"private"}))}><option value="public">Công khai</option><option value="private">Riêng tư</option></select>{updateCandidate&&<div className="sm:col-span-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900"><strong className="block">Đã có tài liệu cùng tên: v{updateCandidate.current_version}</strong><p className="mt-1">Mặc định file này sẽ trở thành phiên bản v{updateCandidate.current_version+1}. Bản cũ vẫn được giữ để so sánh, tải xuống và backup.</p><label className="mt-3 flex items-center gap-2 font-semibold"><input type="checkbox" checked={uploadAsNew} onChange={e=>setUploadAsNew(e.target.checked)}/>Tạo thành tài liệu mới riêng biệt</label></div>}</div>
+    {uploadOpen&&<Modal onClose={()=>{setUploadOpen(false);setFolderRequestSent(false);setNewFolderName("");setNewFolderParent("");setAiPanelPrompt("");}}><p className="eyebrow">Nhập tài liệu có hỗ trợ AI</p><h2 className="page-title mt-1">Tải tài liệu mới</h2><label className="mini-grid mt-5 block rounded-xl border-2 border-dashed border-blue-300 p-8 text-center"><Upload className="mx-auto text-blue-600"/><strong className="mt-3 block text-sm">{file?.name||"Chọn tệp để tải lên"}</strong>{file&&<span className="muted mt-1 block text-xs">{formatFileSize(file.size)} · tải theo chunk · AI xử lý nền · tối đa 250 MB</span>}<input type="file" className="hidden" disabled={launchedActive} onChange={e=>selectFile(e.target.files?.[0]||null)}/></label><div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="relative"><input className={`field w-full pr-8 ${autoAnalyzing?"opacity-60":""}`} placeholder={autoAnalyzing?"AI đang đọc tài liệu...":"Tên tài liệu"} value={metadata.title} disabled={autoAnalyzing} onChange={e=>{setMetadata(x=>({...x,title:e.target.value}));setUploadAsNew(false)}}/>{autoAnalyzing&&<LoaderCircle className="animate-spin absolute right-2.5 top-2.5 text-blue-500" size={14}/>}</div><div className="relative"><input className={`field w-full pr-8 ${autoAnalyzing?"opacity-60":""}`} placeholder={autoAnalyzing?"Đang phân tích...":"Chủ đề"} value={metadata.topic} disabled={autoAnalyzing} onChange={e=>setMetadata(x=>({...x,topic:e.target.value}))}/>{autoAnalyzing&&<LoaderCircle className="animate-spin absolute right-2.5 top-2.5 text-blue-500" size={14}/>}</div><select className="field" value={metadata.doc_type} disabled={autoAnalyzing} onChange={e=>{setDocumentTypeTouched(true);setMetadata(x=>({...x,doc_type:e.target.value}))}}>{DOCUMENT_TYPES.map(type=><option key={type} value={type}>{type}</option>)}</select><select className="field" value={metadata.visibility} onChange={e=>setMetadata(x=>({...x,visibility:e.target.value as "public"|"private"}))}><option value="public">Công khai</option><option value="private">Riêng tư</option></select>{updateCandidate&&<div className="sm:col-span-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900"><strong className="block">Đã có tài liệu cùng tên: v{updateCandidate.current_version}</strong><p className="mt-1">Mặc định file này sẽ trở thành phiên bản v{updateCandidate.current_version+1}. Bản cũ vẫn được giữ để so sánh, tải xuống và backup.</p><label className="mt-3 flex items-center gap-2 font-semibold"><input type="checkbox" checked={uploadAsNew} onChange={e=>setUploadAsNew(e.target.checked)}/>Tạo thành tài liệu mới riêng biệt</label></div>}</div>
 {/* === 2-PANEL DESTINATION PICKER (pre-upload + pending_confirmation) === */}
 {file&&launchedTask?.status!=="pending_confirmation"&&!launchedActive&&(()=>{
   const aiNode=metadata.folder_node_id?folderOptions.find(o=>o.id===metadata.folder_node_id):undefined;
@@ -493,9 +569,22 @@ export default function Repository() {
               ))}
             </div>
           ):(
-            <div className="my-2 flex-1 rounded-lg bg-white p-2 text-xs text-gray-400">
-              <p>Không tìm được vị trí phù hợp.</p>
-              <p className="mt-1 text-[10px]">Chọn thủ công hoặc mô tả trong chat.</p>
+            <div className="my-2 flex-1 rounded-lg bg-white p-2 text-xs text-gray-500" onClick={e=>e.stopPropagation()}>
+              <p className="text-gray-400">AI chưa tìm được vị trí phù hợp.</p>
+              <p className="mt-1 mb-2 text-[10px] text-gray-400">Mô tả tài liệu để AI gợi ý nơi lưu:</p>
+              <div className="flex gap-1">
+                <input
+                  className="field flex-1 text-xs"
+                  placeholder="VD: bài giảng machine learning..."
+                  value={aiPanelPrompt}
+                  onChange={e=>setAiPanelPrompt(e.target.value)}
+                  onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submitAiPanelPrompt();}}}
+                  disabled={aiPanelBusy}
+                />
+                <button type="button" onClick={submitAiPanelPrompt} disabled={!aiPanelPrompt.trim()||aiPanelBusy} className="rounded-lg border border-blue-300 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-40">
+                  {aiPanelBusy?"...":"→"}
+                </button>
+              </div>
             </div>
           )}
           <button type="button" disabled={!hasAi||autoAnalyzing} onClick={e=>{e.stopPropagation();if(hasAi)setDestinationSource("ai");}} className={`mt-auto w-full rounded-lg py-2 text-xs font-semibold transition ${destinationSource==="ai"&&hasAi?"bg-blue-500 text-white":"border border-gray-300 bg-white text-gray-700 hover:border-blue-400 disabled:cursor-not-allowed disabled:opacity-40"}`}>{destinationSource==="ai"?"✓ Đã chọn":"Chọn phương án này"}</button>
@@ -506,7 +595,7 @@ export default function Repository() {
           <div className="my-2 flex-1 space-y-2">
             {folderOptions.length>0&&<FolderNodePicker options={folderOptions} value={metadata.folder_node_id} onChange={node=>{selectManualFolder(node);setDestinationSource("manual");}}/>}
             <FolderPicker tree={virtualFolderTree} value={metadata.folder_path} onChange={path=>{selectFolderPath(path);if(path)setDestinationSource("manual");}}/>
-            <input className="field w-full text-xs" placeholder="Hoặc nhập tên thư mục mới..." value={metadata.folder_path} onChange={e=>{selectFolderPath(e.target.value);if(e.target.value)setDestinationSource("manual");}}/>
+            <input className="field w-full text-xs" placeholder="Hoặc nhập đường dẫn thủ công..." value={metadata.folder_path} onChange={e=>{selectFolderPath(e.target.value);if(e.target.value)setDestinationSource("manual");}}/>
             {destinationSource==="manual"&&finalDestination.path&&(
               <div className="rounded-lg bg-white p-2 text-xs">
                 {finalDestination.path.split("/").map((part,i,arr)=>(
@@ -517,6 +606,18 @@ export default function Repository() {
                 ))}
               </div>
             )}
+            <div className="border-t pt-2">
+              <p className="mb-1 text-[10px] font-semibold text-gray-500">📁 Yêu cầu tạo thư mục mới</p>
+              {folderRequestSent?(
+                <p className="rounded-lg bg-green-50 px-2 py-1 text-[10px] text-green-700">✓ Đã gửi yêu cầu tới admin duyệt.</p>
+              ):(
+                <div className="space-y-1">
+                  <input className="field w-full text-xs" placeholder="Tên thư mục mới (VD: Computer Vision)" value={newFolderName} onChange={e=>setNewFolderName(e.target.value)}/>
+                  <input className="field w-full text-xs" placeholder="Thuộc thư mục cha (tuỳ chọn)" value={newFolderParent} onChange={e=>setNewFolderParent(e.target.value)}/>
+                  <button type="button" onClick={submitFolderRequest} disabled={!newFolderName.trim()||folderRequestBusy} className="w-full rounded-lg border border-blue-300 bg-blue-50 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-40">{folderRequestBusy?"Đang gửi...":"Gửi yêu cầu tới admin"}</button>
+                </div>
+              )}
+            </div>
           </div>
           <button type="button" disabled={destinationSource!=="manual"&&!metadata.folder_node_id&&!metadata.folder_path} onClick={()=>setDestinationSource("manual")} className={`mt-auto w-full rounded-lg py-2 text-xs font-semibold transition ${destinationSource==="manual"?"bg-blue-500 text-white":"border border-gray-300 bg-white text-gray-700 hover:border-blue-400"}`}>{destinationSource==="manual"?"✓ Đã chọn":"Chọn phương án này"}</button>
         </div>
@@ -543,11 +644,25 @@ export default function Repository() {
           </div>
         ):(
           <div className="my-2 flex-1 rounded-lg bg-white p-2 text-xs text-gray-500">
-            <p>Không tìm được học phần phù hợp trong cây tri thức.</p>
-            {classificationTicket.suggestions.length>0&&<div className="mt-2 space-y-1">{classificationTicket.suggestions.slice(0,2).map(s=><p key={s.course_id} className="text-[10px] text-gray-400">Gợi ý: {s.course} ({Math.round(s.confidence*100)}%)</p>)}</div>}
+            <p className="text-gray-400">AI chưa tìm được học phần trong cây tri thức.</p>
+            {classificationTicket.suggestions.length>0&&<div className="mt-1 mb-2 space-y-1">{classificationTicket.suggestions.slice(0,2).map(s=><p key={s.course_id} className="text-[10px] text-gray-400">Gợi ý: {s.course} ({Math.round(s.confidence*100)}%)</p>)}</div>}
+            <p className="mb-1 text-[10px] text-gray-400">Mô tả để AI tìm lại nơi lưu:</p>
+            <div className="flex gap-1" onClick={e=>e.stopPropagation()}>
+              <input
+                className="field flex-1 text-xs"
+                placeholder="VD: slide môn computer vision..."
+                value={aiPanelPrompt}
+                onChange={e=>setAiPanelPrompt(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submitAiPanelPrompt();}}}
+                disabled={aiPanelBusy}
+              />
+              <button type="button" onClick={e=>{e.stopPropagation();submitAiPanelPrompt();}} disabled={!aiPanelPrompt.trim()||aiPanelBusy} className="rounded-lg border border-blue-300 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-40">
+                {aiPanelBusy?"...":"→"}
+              </button>
+            </div>
           </div>
         )}
-        <button type="button" disabled={!classificationTicket.suggested_course_id} onClick={()=>{if(classificationTicket.suggested_course_id)setDestinationSource("ai");}} className={`mt-auto w-full rounded-lg py-2 text-xs font-semibold transition ${destinationSource==="ai"&&classificationTicket.suggested_course_id?"bg-blue-500 text-white":"border border-gray-300 bg-white text-gray-700 hover:border-blue-400 disabled:cursor-not-allowed disabled:opacity-40"}`}>{destinationSource==="ai"?"✓ Đã chọn phương án này":"Chọn phương án này"}</button>
+        <button type="button" disabled={!classificationTicket.suggested_course_id&&!metadata.folder_node_id&&!metadata.folder_path} onClick={()=>{if(classificationTicket.suggested_course_id||metadata.folder_node_id||metadata.folder_path)setDestinationSource("ai");}} className={`mt-auto w-full rounded-lg py-2 text-xs font-semibold transition ${destinationSource==="ai"&&(classificationTicket.suggested_course_id||metadata.folder_node_id)?"bg-blue-500 text-white":"border border-gray-300 bg-white text-gray-700 hover:border-blue-400 disabled:cursor-not-allowed disabled:opacity-40"}`}>{destinationSource==="ai"?"✓ Đã chọn phương án này":"Chọn phương án này"}</button>
       </div>
       {/* Panel phải: Chọn thủ công */}
       <div className={`flex flex-col rounded-xl border-2 p-3 transition-all ${destinationSource==="manual"?"border-blue-500 bg-blue-50":"border-gray-200 bg-gray-50"}`}>
@@ -555,13 +670,25 @@ export default function Repository() {
         <div className="my-2 flex-1 space-y-2">
           {folderOptions.length>0&&<FolderNodePicker options={folderOptions} value={metadata.folder_node_id} onChange={node=>{selectManualFolder(node);setDestinationSource("manual");}}/>}
           <FolderPicker tree={virtualFolderTree} value={metadata.folder_path} onChange={path=>{selectFolderPath(path);if(path)setDestinationSource("manual");}}/>
-          <input className="field w-full text-xs" placeholder="Hoặc nhập tên thư mục mới..." value={metadata.folder_path} onChange={e=>{selectFolderPath(e.target.value);if(e.target.value)setDestinationSource("manual");}}/>
+          <input className="field w-full text-xs" placeholder="Hoặc nhập đường dẫn thủ công..." value={metadata.folder_path} onChange={e=>{selectFolderPath(e.target.value);if(e.target.value)setDestinationSource("manual");}}/>
           {destinationSource==="manual"&&finalDestination.path&&(
             <div className="rounded-lg bg-white p-2 text-xs">
               <p className="text-[10px] text-gray-400 mb-1">Xem trước đường dẫn:</p>
               <p className="font-mono text-blue-700 break-all">{finalDestination.path}</p>
             </div>
           )}
+          <div className="border-t pt-2">
+            <p className="mb-1 text-[10px] font-semibold text-gray-500">📁 Yêu cầu tạo thư mục mới</p>
+            {folderRequestSent?(
+              <p className="rounded-lg bg-green-50 px-2 py-1 text-[10px] text-green-700">✓ Đã gửi yêu cầu tới admin duyệt.</p>
+            ):(
+              <div className="space-y-1">
+                <input className="field w-full text-xs" placeholder="Tên thư mục mới (VD: Computer Vision)" value={newFolderName} onChange={e=>setNewFolderName(e.target.value)}/>
+                <input className="field w-full text-xs" placeholder="Thuộc thư mục cha (tuỳ chọn)" value={newFolderParent} onChange={e=>setNewFolderParent(e.target.value)}/>
+                <button type="button" onClick={submitFolderRequest} disabled={!newFolderName.trim()||folderRequestBusy} className="w-full rounded-lg border border-blue-300 bg-blue-50 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-40">{folderRequestBusy?"Đang gửi...":"Gửi yêu cầu tới admin"}</button>
+              </div>
+            )}
+          </div>
         </div>
         <button type="button" disabled={destinationSource!=="manual"&&!metadata.folder_node_id&&!metadata.folder_path&&!metadata.course_id} onClick={()=>setDestinationSource("manual")} className={`mt-auto w-full rounded-lg py-2 text-xs font-semibold transition ${destinationSource==="manual"?"bg-blue-500 text-white":"border border-gray-300 bg-white text-gray-700 hover:border-blue-400"}`}>{destinationSource==="manual"?"✓ Đã chọn phương án này":"Chọn phương án này"}</button>
       </div>

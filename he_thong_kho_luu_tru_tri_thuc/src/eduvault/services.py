@@ -3095,33 +3095,74 @@ def quick_preview_text(filename: str, mime_type: str, raw: bytes) -> str:
     return ""
 
 
+def _score_text_vs_name(text: str, name: str) -> int:
+    """Score how well a casefold name matches the document text.
+
+    Scoring:
+    - +3  exact substring match (e.g. "deep learning" in text)
+    - +1 per token from name found in text as a word token (max 3)
+    - +1 per bigram from name found in text (max 2)
+    """
+    cname = name.casefold()
+    score = 3 if cname in text else 0
+
+    # tokens from course name that appear in text
+    name_tokens = set(t for t in re.findall(r"\w+", cname, re.UNICODE) if len(t) >= 2)
+    text_tokens = set(re.findall(r"\w+", text, re.UNICODE))
+    token_hits = len(name_tokens & text_tokens)
+    score += min(token_hits, 3)
+
+    # bigrams of course name found in text (captures "deep learning", "co so", etc.)
+    name_words = [t for t in re.findall(r"\w+", cname, re.UNICODE) if len(t) >= 2]
+    bigrams = {f"{name_words[i]} {name_words[i+1]}" for i in range(len(name_words) - 1)}
+    score += min(sum(1 for bg in bigrams if bg in text), 2)
+
+    return score
+
+
 def suggest_upload_destination(db, user: dict, filename: str, preview: str) -> dict:
     text = f"{filename} {preview}".casefold()
-    best: tuple[int, dict | None, dict | None] = (0, None, None)
     policy = active_policy(db)
+    best_score = 0
+    best_spec_node = None
+    best_course_node = None
+
     if policy:
-        tree = json.loads(policy["parsed_json"])
-        for spec in normalize_policy_tree(tree)["specializations"]:
-            spec_score = 2 if spec["name"].casefold() in text else 0
-            for course in spec["courses"]:
-                score = spec_score + (3 if course["name"].casefold() in text else 0)
-                if score > best[0]:
-                    best = (score, spec, course)
-    spec, course = best[1], best[2]
+        specs = rows(db.execute(
+            "SELECT s.id specialization_id, s.name specialization_name, s.folder_node_id specialization_node_id "
+            "FROM specializations s WHERE s.policy_id=?",
+            (policy["id"],),
+        ).fetchall())
+        for spec in specs:
+            spec_score = _score_text_vs_name(text, spec["specialization_name"])
+            courses = rows(db.execute(
+                "SELECT * FROM folder_nodes WHERE parent_id=? AND type='course' AND status='active'",
+                (spec["specialization_node_id"],),
+            ).fetchall())
+            for course in courses:
+                course_score = _score_text_vs_name(text, course["name"])
+                total = spec_score + course_score
+                if total > best_score:
+                    best_score = total
+                    best_spec_node = spec
+                    best_course_node = course
+
     doc_type = "Tài liệu khác"
     for candidate in DOCUMENT_TYPES:
         if candidate.casefold() in text or candidate.replace(" ", "_").casefold() in text:
             doc_type = candidate
             break
-    folder_path = "/".join(part for part in [
-        spec["name"] if spec else "",
-        course["name"] if course else "",
-        doc_type,
-    ] if part)
+
+    spec_name = best_spec_node["specialization_name"] if best_spec_node else ""
+    course_name = best_course_node["name"] if best_course_node else ""
+    folder_path = "/".join(part for part in [spec_name, course_name, doc_type] if part)
+    confidence = 0.95 if best_score >= 6 else (0.75 if best_score >= 3 else (0.5 if best_score > 0 else 0.0))
     return {
-        "specialization": spec["name"] if spec else "",
-        "course": course["name"] if course else "",
-        "confidence": 0.95 if best[0] >= 5 else (0.65 if best[0] else 0.0),
+        "specialization": spec_name,
+        "specialization_id": best_spec_node["specialization_id"] if best_spec_node else None,
+        "course": course_name,
+        "folder_node_id": best_course_node["id"] if best_course_node else None,
+        "confidence": confidence,
         "document_type": doc_type,
         "folder_path": safe_folder_path(folder_path) if folder_path else "",
     }
@@ -3143,11 +3184,10 @@ def active_course_suggestions(db, filename: str, preview: str) -> list[dict]:
             "SELECT * FROM folder_nodes WHERE parent_id=? AND type='course' AND status='active'",
             (spec["specialization_node_id"],),
         ).fetchall())
-        spec_score = 2 if spec["specialization_name"].casefold() in text else 0
+        spec_score = _score_text_vs_name(text, spec["specialization_name"])
         for course in courses:
-            course_score = 3 if course["name"].casefold() in text else 0
-            token_hits = sum(1 for token in re.findall(r"\w+", course["name"].casefold(), re.UNICODE) if len(token) > 2 and token in text)
-            score = spec_score + course_score + min(token_hits, 2)
+            course_score = _score_text_vs_name(text, course["name"])
+            score = spec_score + course_score
             suggestions.append({
                 "specialization_id": spec["specialization_id"],
                 "specialization": spec["specialization_name"],
