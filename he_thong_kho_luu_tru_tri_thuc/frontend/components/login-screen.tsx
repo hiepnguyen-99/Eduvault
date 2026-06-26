@@ -29,6 +29,7 @@ export function LoginScreen() {
     setError("");
     try {
       await login(code, password);
+      window.location.href = "/";
     } catch (err) {
       setError(err instanceof Error ? err.message : "Đăng nhập thất bại.");
     } finally {
@@ -76,12 +77,12 @@ export function LoginScreen() {
           <div className="space-y-4 border-l border-white/20 pl-4">
             {/* Feature 1 */}
             <div className="flex gap-4 items-start group/feat cursor-pointer p-2 rounded-xl transition-all duration-300 hover:bg-white/5 hover:translate-x-2">
-              <div className="h-10 w-10 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center shrink-0 transition-all duration-300 group-hover/feat:bg-blue-500/40 group-hover/feat:scale-110 group-hover/feat:shadow-[0_0_12px_rgba(59,130,246,0.3)]">
-                <Sparkles size={18} className="text-blue-300" />
+              <div className="h-10 w-10 rounded-xl bg-[#C92027]/20 border border-[#C92027]/30 flex items-center justify-center shrink-0 transition-all duration-300 group-hover/feat:bg-[#C92027]/40 group-hover/feat:scale-110 group-hover/feat:shadow-[0_0_12px_rgba(201,32,39,0.3)]">
+                <Sparkles size={18} className="text-red-300" />
               </div>
               <div className="space-y-0.5">
                 <strong className="text-sm block font-bold tracking-tight text-white transition-colors duration-200 group-hover/feat:text-yellow-300">
-                  Trợ lý AI thông minh
+                  Trợ lý AI
                 </strong>
                 <span className="text-xs text-gray-300 transition-colors duration-200 group-hover/feat:text-white">
                   Hỏi đáp tài liệu RAG, trích xuất dữ liệu tự động.
@@ -91,8 +92,8 @@ export function LoginScreen() {
 
             {/* Feature 2 */}
             <div className="flex gap-4 items-start group/feat cursor-pointer p-2 rounded-xl transition-all duration-300 hover:bg-white/5 hover:translate-x-2">
-              <div className="h-10 w-10 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0 transition-all duration-300 group-hover/feat:bg-emerald-500/40 group-hover/feat:scale-110 group-hover/feat:shadow-[0_0_12px_rgba(16,185,129,0.3)]">
-                <Shield size={18} className="text-emerald-300" />
+              <div className="h-10 w-10 rounded-xl bg-[#C92027]/20 border border-[#C92027]/30 flex items-center justify-center shrink-0 transition-all duration-300 group-hover/feat:bg-[#C92027]/40 group-hover/feat:scale-110 group-hover/feat:shadow-[0_0_12px_rgba(201,32,39,0.3)]">
+                <Shield size={18} className="text-red-300" />
               </div>
               <div className="space-y-0.5">
                 <strong className="text-sm block font-bold tracking-tight text-white transition-colors duration-200 group-hover/feat:text-yellow-300">
@@ -106,8 +107,8 @@ export function LoginScreen() {
 
             {/* Feature 3 */}
             <div className="flex gap-4 items-start group/feat cursor-pointer p-2 rounded-xl transition-all duration-300 hover:bg-white/5 hover:translate-x-2">
-              <div className="h-10 w-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center shrink-0 transition-all duration-300 group-hover/feat:bg-purple-500/40 group-hover/feat:scale-110 group-hover/feat:shadow-[0_0_12px_rgba(168,85,247,0.3)]">
-                <RefreshCw size={18} className="text-purple-300" />
+              <div className="h-10 w-10 rounded-xl bg-[#C92027]/20 border border-[#C92027]/30 flex items-center justify-center shrink-0 transition-all duration-300 group-hover/feat:bg-[#C92027]/40 group-hover/feat:scale-110 group-hover/feat:shadow-[0_0_12px_rgba(201,32,39,0.3)]">
+                <RefreshCw size={18} className="text-red-300" />
               </div>
               <div className="space-y-0.5">
                 <strong className="text-sm block font-bold tracking-tight text-white transition-colors duration-200 group-hover/feat:text-yellow-300">
@@ -149,11 +150,11 @@ export function LoginScreen() {
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-gray-700 uppercase tracking-wider block">Mã người dùng</label>
               <div className="relative group/input">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-gray-400 group-focus-within/input:text-blue-600 transition-colors duration-200">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-gray-400 group-focus-within/input:text-[#102451] transition-colors duration-200">
                   <Sparkles size={16} />
                 </div>
                 <input 
-                  className="w-full bg-gray-50/50 hover:bg-gray-50 border border-gray-200 rounded-xl py-3 pl-11 pr-4 focus:ring-4 focus:ring-blue-500/10 focus:border-blue-600 outline-none transition-all duration-200 placeholder:text-gray-400 text-sm" 
+                  className="w-full bg-gray-50/50 hover:bg-gray-50 border border-gray-200 rounded-xl py-3 pl-11 pr-4 focus:ring-4 focus:ring-[#102451]/10 focus:border-[#102451] outline-none transition-all duration-200 placeholder:text-gray-400 text-sm" 
                   placeholder="Ví dụ: GV001, ADMIN" 
                   value={code} 
                   onChange={e => setCode(e.target.value)}
@@ -166,12 +167,12 @@ export function LoginScreen() {
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-gray-700 uppercase tracking-wider block">Mật khẩu</label>
               <div className="relative group/input">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-gray-400 group-focus-within/input:text-blue-600 transition-colors duration-200">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-gray-400 group-focus-within/input:text-[#102451] transition-colors duration-200">
                   <LockKeyhole size={16} />
                 </div>
                 <input 
                   type="password" 
-                  className="w-full bg-gray-50/50 hover:bg-gray-50 border border-gray-200 rounded-xl py-3 pl-11 pr-4 focus:ring-4 focus:ring-blue-500/10 focus:border-blue-600 outline-none transition-all duration-200 placeholder:text-gray-400 text-sm" 
+                  className="w-full bg-gray-50/50 hover:bg-gray-50 border border-gray-200 rounded-xl py-3 pl-11 pr-4 focus:ring-4 focus:ring-[#102451]/10 focus:border-[#102451] outline-none transition-all duration-200 placeholder:text-gray-400 text-sm" 
                   placeholder="••••••••"
                   value={password} 
                   onChange={e => setPassword(e.target.value)}
@@ -189,7 +190,7 @@ export function LoginScreen() {
             {/* Login Button with Hover/Active Effects */}
             <button 
               disabled={loading} 
-              className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg hover:shadow-blue-500/10 active:scale-[0.98] transform transition-all duration-200 cursor-pointer flex justify-center items-center gap-2 mt-6 disabled:opacity-50 disabled:pointer-events-none"
+              className="w-full py-3.5 bg-[#102451] hover:bg-[#C92027] text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg hover:shadow-[#C92027]/10 active:scale-[0.98] transform transition-all duration-200 cursor-pointer flex justify-center items-center gap-2 mt-6 disabled:opacity-50 disabled:pointer-events-none"
             >
               {loading ? (
                 <LoaderCircle className="animate-spin" size={18}/>

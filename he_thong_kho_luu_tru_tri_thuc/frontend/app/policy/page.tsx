@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
@@ -1007,7 +1007,7 @@ function TreePreview({ node }: { node: FolderNode }) {
   return (
     <div>
       <div className="mb-3 flex flex-wrap gap-2">
-        <div className="relative min-w-72 flex-1"><Search className="muted absolute left-3 top-2.5" size={14}/><input className="field pl-9" value={query} onChange={event => setQuery(event.target.value)} placeholder="Ví dụ: Chuyển GV001 sang IoT" /></div>
+        <div className="relative min-w-72 flex-1"><Search className="muted absolute left-3 top-2.5" size={14}/><input className="field" style={{ paddingLeft: "2.25rem" }} value={query} onChange={event => setQuery(event.target.value)} placeholder="Ví dụ: Chuyển GV001 sang IoT" /></div>
         <button className="btn-secondary" onClick={() => setExpanded(collectAll(node))}>Expand</button>
         <button className="btn-secondary" onClick={() => setExpanded(new Set([node.path]))}>Collapse</button>
       </div>

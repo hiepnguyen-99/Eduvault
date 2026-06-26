@@ -129,7 +129,8 @@ function GlobalSearchPage() {
         <div className="relative flex-1">
           <Search className="muted absolute left-3 top-3" size={17} />
           <input
-            className="field h-11 pl-10"
+            className="field h-11"
+            style={{ paddingLeft: "2.5rem" }}
             value={query}
             onChange={event => setQuery(event.target.value)}
             placeholder="Tìm tài liệu, học phần, giảng viên..."

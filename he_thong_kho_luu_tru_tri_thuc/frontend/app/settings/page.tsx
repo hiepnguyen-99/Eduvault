@@ -77,7 +77,7 @@ export default function Settings() {
     <div>
       <PageHeader
         eyebrow="Cài đặt hệ thống"
-        title="Cấu hình EduVault"
+        title="Cấu hình hệ thống"
         description="Quản lý chính sách, cây thư mục chuẩn và các cấu hình hệ thống."
         actions={<button className="btn-primary"><Save size={15}/>Đã kết nối</button>}
       />
@@ -213,7 +213,7 @@ function TreePreview({ node }: { node: FolderNode }) {
     <div>
       <div className="relative mb-3">
         <Search className="muted absolute left-3 top-2.5" size={14}/>
-        <input className="field pl-9" value={query} onChange={event => setQuery(event.target.value)} placeholder="Tìm nhánh trong cây tri thức..."/>
+        <input className="field" style={{ paddingLeft: "2.25rem" }} value={query} onChange={event => setQuery(event.target.value)} placeholder="Tìm nhánh trong cây tri thức..."/>
       </div>
       <div role="tree" className="max-h-[50vh] overflow-auto">{render(node)}</div>
     </div>

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, ChevronDown, Download, ExternalLink, FileText, Flag, LoaderCircle, MessageSquare, Plus, Send, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
+import { Bot, ChevronDown, Download, ExternalLink, FileText, Flag, LoaderCircle, Maximize2, MessageSquare, Plus, Send, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { API_URL } from "@/lib/api";
 
@@ -89,7 +89,7 @@ function FriendlyAnswer({ answer }: { answer: string }) {
 
   function flushBullets() {
     if (!bullets.length) return;
-    blocks.push(<ul key={`list-${blocks.length}`} className="space-y-2 pl-1">{bullets.map((item, index) => <li key={index} className="flex gap-2"><span className="mt-0.5 text-blue-600">•</span><span><InlineMarkdown text={item}/></span></li>)}</ul>);
+    blocks.push(<ul key={`list-${blocks.length}`} className="space-y-2 pl-1">{bullets.map((item, index) => <li key={index} className="flex gap-2"><span className="mt-0.5 text-[#C92027]">•</span><span><InlineMarkdown text={item}/></span></li>)}</ul>);
     bullets = [];
   }
 
@@ -114,7 +114,7 @@ function buildContextQuestion(question: string, context?: AssistantContext, memo
   const longTerm = (memory?.longTerm || []).slice(-8);
   if (!lines.length && !shortTerm.length && !longTerm.length) return question;
   return [
-    `Ngữ cảnh trang hiện tại: ${context?.title || "EduVault"}`,
+    `Ngữ cảnh trang hiện tại: ${context?.title || "Kho tri thức"}`,
     ...lines,
     shortTerm.length ? `Bộ nhớ ngắn hạn:\n${shortTerm.map(item => `- ${item}`).join("\n")}` : "",
     longTerm.length ? `Bộ nhớ dài hạn:\n${longTerm.map(item => `- ${item}`).join("\n")}` : "",
@@ -126,7 +126,7 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: 
   const [open, setOpen] = useState(false);
   if (!citations.length) return null;
   return <div className="mt-4 border-t border-[var(--border)] pt-3">
-    <button onClick={() => setOpen(value => !value)} className="flex items-center gap-1.5 text-[11px] text-[var(--muted)] transition-colors hover:text-blue-600">
+    <button onClick={() => setOpen(value => !value)} className="flex items-center gap-1.5 text-[11px] text-[var(--muted)] transition-colors hover:text-[#C92027]">
       <FileText size={12}/>
       Nguồn tham khảo ({citations.length})
       <ChevronDown size={12} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}/>
@@ -136,9 +136,9 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: 
         <strong className="block text-xs">{item.title}</strong>
         <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
         <div className="mt-2 flex gap-2">
-          {onPreview && <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>}
+          {onPreview && <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-[#102451] hover:underline"><FileText size={11}/>Xem nội dung</button>}
           {onPreview && <span className="text-[var(--border)]">·</span>}
-          <Link href={`/documents/${item.id}#pdf`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"><ExternalLink size={11}/>Chi tiết</Link>
+          <Link href={`/documents/${item.id}#pdf`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-[#C92027]"><ExternalLink size={11}/>Chi tiết</Link>
         </div>
       </div>)}
     </div>}
@@ -153,7 +153,7 @@ function FeedbackControls({ value, disabled, onSend }: { value?: FeedbackRating;
   ];
   return <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-3">
     <span className="text-[11px] font-semibold text-[var(--muted)]">Phản hồi</span>
-    {options.map(item => <button key={item.rating} type="button" disabled={disabled || !!value} onClick={() => onSend(item.rating)} className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-colors ${value === item.rating ? "border-blue-200 bg-blue-50 text-blue-700" : "border-[var(--border)] bg-[var(--card)] text-[var(--muted)] hover:border-blue-200 hover:text-blue-600"} disabled:cursor-default disabled:opacity-70`}>
+    {options.map(item => <button key={item.rating} type="button" disabled={disabled || !!value} onClick={() => onSend(item.rating)} className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-colors ${value === item.rating ? "border-[#102451]/30 bg-[#102451]/10 text-[#102451]" : "border-[var(--border)] bg-[var(--card)] text-[var(--muted)] hover:border-[#C92027]/40 hover:text-[#C92027]"} disabled:cursor-default disabled:opacity-70`}>
       {item.icon}
       {value === item.rating ? "Đã ghi nhận" : item.label}
     </button>)}
@@ -433,18 +433,19 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
   return <div className={`flex min-h-0 flex-col overflow-hidden ${isPanel ? "h-full bg-[var(--card)]" : "app-card min-h-[680px]"} ${className}`}>
     <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
       <div className="min-w-0">
-        <div className="flex items-center gap-2 font-bold"><Bot className="text-blue-600" size={17}/>Trợ lý AI EduVault</div>
+        <div className="flex items-center gap-2 font-bold"><Bot className="text-[#102451]" size={17}/>Trợ lý AI</div>
         <p className="muted mt-0.5 truncate text-[11px]">{context?.title || "Hỏi đáp trên kho tri thức được phép truy cập"}</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <button className={memoryOpen ? "btn-secondary h-8 px-2 text-[11px] text-blue-700" : "btn-secondary h-8 px-2 text-[11px]"} title="Bộ nhớ trợ lý" aria-label="Bộ nhớ trợ lý" onClick={openMemoryPanel}><MessageSquare size={13}/>Bộ nhớ</button>
+        <button className={memoryOpen ? "btn-secondary h-8 px-2 text-[11px] text-[#102451]" : "btn-secondary h-8 px-2 text-[11px]"} title="Bộ nhớ trợ lý" aria-label="Bộ nhớ trợ lý" onClick={openMemoryPanel}><MessageSquare size={13}/>Bộ nhớ</button>
         <button className="icon-btn h-8 w-8" title="Cuộc hội thoại mới" aria-label="Cuộc hội thoại mới" onClick={createNew}><Plus size={14}/></button>
         <button className="icon-btn h-8 w-8" title="Xóa nội dung chat" aria-label="Xóa nội dung chat" onClick={clearActive}><Trash2 size={14}/></button>
+        {isPanel && <Link href="/assistant" className="icon-btn h-8 w-8 flex items-center justify-center" title="Mở toàn màn hình" aria-label="Mở toàn màn hình"><Maximize2 size={14}/></Link>}
         {onClose && <button className="icon-btn h-8 w-8" title="Đóng trợ lý" aria-label="Đóng trợ lý" onClick={onClose}><X size={15}/></button>}
       </div>
     </div>
 
-    {contextLines.length > 0 && <div className="shrink-0 border-b border-[var(--border)] bg-blue-50/60 px-4 py-2 text-[11px] text-blue-900">
+    {contextLines.length > 0 && <div className="shrink-0 border-b border-[var(--border)] bg-[#102451]/10 px-4 py-2 text-[11px] text-[#102451]">
       <strong className="block">Ngữ cảnh hiện tại</strong>
       <p className="mt-1 line-clamp-2">{contextLines.join(" · ")}</p>
     </div>}
@@ -469,11 +470,11 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
     <div className={`min-h-0 flex-1 ${isPanel ? "flex flex-col" : "grid xl:grid-cols-[240px_minmax(0,1fr)]"}`}>
       <aside className={`${isPanel ? "max-h-28 shrink-0 border-b" : "border-r"} border-[var(--border)] overflow-auto`}>
         <div className={`${isPanel ? "flex gap-2 overflow-x-auto p-2" : "space-y-0.5 p-2"}`}>
-          {conversations.map(c => <div key={c.id} className={`group flex min-w-0 items-start gap-1 rounded-lg px-2 py-2 ${isPanel ? "w-52 shrink-0" : ""} ${c.id === activeId ? "bg-blue-50" : "hover:bg-[var(--soft)]"}`}>
+          {conversations.map(c => <div key={c.id} className={`group flex min-w-0 items-start gap-1 rounded-lg px-2 py-2 ${isPanel ? "w-52 shrink-0" : ""} ${c.id === activeId ? "bg-[#102451]/10" : "hover:bg-[var(--soft)]"}`}>
             <button className="flex min-w-0 flex-1 gap-2 text-left" onClick={() => { setActiveId(c.id); setError(""); }}>
-              <MessageSquare size={14} className={`mt-0.5 shrink-0 ${c.id === activeId ? "text-blue-600" : "text-[var(--muted)]"}`}/>
+              <MessageSquare size={14} className={`mt-0.5 shrink-0 ${c.id === activeId ? "text-[#102451]" : "text-[var(--muted)]"}`}/>
               <div className="min-w-0">
-                <span className={`block truncate text-xs font-medium ${c.id === activeId ? "text-blue-700" : ""}`}>{c.title}</span>
+                <span className={`block truncate text-xs font-medium ${c.id === activeId ? "text-[#102451]" : ""}`}>{c.title}</span>
                 <span className="muted text-[10px]">{c.messages.length} tin · {new Date(c.updatedAt).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
               </div>
             </button>
@@ -485,8 +486,8 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
       <section className="flex min-h-0 flex-1 flex-col p-4">
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
           <div className="max-w-[88%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-4 text-sm">
-            <div className="mb-2 flex items-center gap-2 font-bold text-blue-600"><Bot size={16}/>EduVault AI</div>
-            <p className="mb-3">Chào bạn! Mình có thể hỗ trợ nhiều việc trong EduVault:</p>
+            <div className="mb-2 flex items-center gap-2 font-bold text-[#102451]"><Bot size={16}/>VinUni AI</div>
+            <p className="mb-3">Chào bạn! Mình có thể hỗ trợ nhiều việc trong Kho tri thức:</p>
             <ul className="space-y-1 text-[var(--text)]">
               <li>📚 <strong>Tìm tài liệu</strong> — theo chủ đề, môn học, loại tài liệu</li>
               <li>💬 <strong>Hỏi đáp nội dung</strong> — giải thích, tóm tắt tài liệu trong kho</li>
@@ -497,13 +498,13 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
             </ul>
           </div>
           {messages.map((item, index) => <div key={index} className="space-y-4">
-            <div className="ml-auto max-w-[82%] rounded-xl rounded-tr-sm bg-blue-600 p-4 text-sm text-white">{item.question}</div>
+            <div className="ml-auto max-w-[82%] rounded-xl rounded-tr-sm bg-[#102451] p-4 text-sm text-white">{item.question}</div>
             <div className="max-w-[95%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-5 text-sm">
-              <div className="mb-3 flex items-center gap-2 text-blue-600">
+              <div className="mb-3 flex items-center gap-2 text-[#102451]">
                 <Sparkles size={15}/>
                 {item.streaming && <span className="text-xs font-medium">{item.status || "Đang trả lời..."}</span>}
               </div>
-              {item.result.answer ? <div><FriendlyAnswer answer={item.result.answer}/>{item.streaming && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-blue-600 align-middle"/>}</div> : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>}
+              {item.result.answer ? <div><FriendlyAnswer answer={item.result.answer}/>{item.streaming && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-[#102451] align-middle"/>}</div> : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>}
               {!item.streaming && <Sources citations={item.result.citations} onPreview={openPreview}/>}
               {!item.streaming && item.result.trace_id && <FeedbackControls value={item.feedback} onSend={rating => sendFeedback(index, rating)}/>}
             </div>
@@ -511,10 +512,10 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
           <div ref={bottomRef}/>
         </div>
 
-        {previewLoading && <div className="mb-2 flex items-center gap-2 rounded bg-blue-50 p-2 text-xs text-blue-700"><LoaderCircle size={13} className="animate-spin"/>Đang tải nội dung tài liệu...</div>}
+        {previewLoading && <div className="mb-2 flex items-center gap-2 rounded bg-[#102451]/10 p-2 text-xs text-[#102451]"><LoaderCircle size={13} className="animate-spin"/>Đang tải nội dung tài liệu...</div>}
         {error && <p className="mb-2 rounded bg-red-50 p-2 text-xs text-red-700">{error}</p>}
         <form onSubmit={submit} className="mt-4 flex gap-2">
-          <input className="field" value={question} onChange={event => setQuestion(event.target.value)} placeholder="Nhập câu hỏi cho Trợ lý AI EduVault..."/>
+          <input className="field" value={question} onChange={event => setQuestion(event.target.value)} placeholder="Nhập câu hỏi cho Trợ lý AI..."/>
           <button disabled={loading || !token} className="btn-primary" aria-label="Gửi">{loading ? <LoaderCircle className="animate-spin" size={16}/> : <Send size={16}/>}</button>
         </form>
       </section>

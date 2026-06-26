@@ -5,32 +5,18 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
   Bell,
-  BookOpenCheck,
   Bot,
-  ChartNoAxesCombined,
+  ChevronDown,
   CheckCircle2,
-  ChevronsLeft,
-  ChevronsRight,
-  ClipboardCheck,
-  DatabaseBackup,
-  FileClock,
-  FilePlus2,
-  FolderKanban,
-  GraduationCap,
-  KeyRound,
   LoaderCircle,
   LogOut,
   Menu,
   Moon,
   RefreshCw,
-  ScrollText,
   Search,
-  Settings,
   Sun,
   Trash2,
   UploadCloud,
-  UserCog,
-  Users,
   X,
   XCircle,
 } from "lucide-react";
@@ -38,33 +24,9 @@ import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { AssistantChat } from "@/components/assistant-chat";
 import { LoginScreen } from "@/components/login-screen";
 import { UploadTask, UploadTaskProvider, useUploadTasks } from "@/components/upload-task-provider";
-import { canAccessPath, permissionsForRole, ROLE_LABELS, ROLE_MENUS, toAppRole } from "@/src/config/role-menu";
+import { canAccessPath, permissionsForRole, ROLE_LABELS, ROLE_MENUS, toAppRole, MenuItem } from "@/src/config/role-menu";
 
-const icons = {
-  dashboard: ChartNoAxesCombined,
-  repository: FolderKanban,
-  upload: FilePlus2,
-  policy: Settings,
-  users: Users,
-  permissions: KeyRound,
-  backup: DatabaseBackup,
-  reports: ChartNoAxesCombined,
-  audit: ScrollText,
-  transfer: GraduationCap,
-  quality: ClipboardCheck,
-  versions: FileClock,
-  chatbot: Bot,
-  profile: UserCog,
-  handover: GraduationCap,
-  summary: BookOpenCheck,
-  search: Search,
-  trash: Trash2,
-};
-
-const SIDEBAR_COLLAPSED_KEY = "eduvault.sidebar.collapsed";
 const GLOBAL_ASSISTANT_OPEN_KEY = "eduvault.global-assistant.open";
-const SIDEBAR_EXPANDED_WIDTH = 304;
-const SIDEBAR_COLLAPSED_WIDTH = 72;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return <AuthProvider><UploadTaskProvider><AuthenticatedShell>{children}</AuthenticatedShell></UploadTaskProvider></AuthProvider>;
@@ -105,7 +67,7 @@ function UploadNotificationMenu() {
 
   return (
     <div className="relative" ref={menuRef}>
-      <button className="icon-btn relative" aria-label="Thông báo" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      <button className="icon-btn relative cursor-pointer" aria-label="Thông báo" aria-expanded={open} onClick={() => setOpen(value => !value)}>
         <Bell size={17}/>
         {badgeCount > 0 && <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white">{badgeCount}</span>}
       </button>
@@ -114,7 +76,6 @@ function UploadNotificationMenu() {
           <UploadCloud className="text-blue-600" size={17}/>
           <div>
             <strong className="block text-sm">Thông báo tải lên</strong>
-            <span className="muted text-[11px]">Theo dõi upload và xử lý tài liệu</span>
           </div>
           {activeCount > 0 && <span className="badge badge-blue ml-auto">{activeCount} đang chạy</span>}
         </div>
@@ -131,9 +92,9 @@ function UploadNotificationMenu() {
                   <strong className="block truncate text-xs">{task.filename}</strong>
                   <span className="muted text-[11px]">{uploadStatusLabels[task.status]}</span>
                 </div>
-                {task.status === "failed" && <button className="btn-secondary px-2 py-1 text-[10px]" onClick={() => retryUpload(task.id)}><RefreshCw size={11}/>Thử lại</button>}
-                {canCancel && <button className="btn-secondary px-2 py-1 text-[10px] text-red-600" onClick={() => removeTask(task.id)}><Trash2 size={11}/>Hủy</button>}
-                {!active && !canCancel && <button className="icon-btn h-7 w-7" aria-label="Xóa tác vụ" onClick={() => removeTask(task.id)}><Trash2 size={12}/></button>}
+                {task.status === "failed" && <button className="btn-secondary px-2 py-1 text-[10px] cursor-pointer" onClick={() => retryUpload(task.id)}><RefreshCw size={11}/>Thử lại</button>}
+                {canCancel && <button className="btn-secondary px-2 py-1 text-[10px] text-red-600 cursor-pointer" onClick={() => removeTask(task.id)}><Trash2 size={11}/>Hủy</button>}
+                {!active && !canCancel && <button className="icon-btn h-7 w-7 cursor-pointer" aria-label="Xóa tác vụ" onClick={() => removeTask(task.id)}><Trash2 size={12}/></button>}
               </div>
               <div className="progress mt-3"><i style={{ width: `${active ? progress : 100}%` }} className={task.status === "failed" ? "!bg-red-500" : task.status === "completed" ? "!bg-green-500" : ""}/></div>
               <div className="muted mt-1 flex justify-between text-[10px]"><span>{formatUploadBytes(task.uploaded_bytes)} / {formatUploadBytes(task.total_bytes)}</span><span>{progress}%</span></div>
@@ -157,29 +118,12 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const [dark, setDark] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [headerQuery, setHeaderQuery] = useState("");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarReady, setSidebarReady] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantReady, setAssistantReady] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
-
-  useEffect(() => {
-    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
-    if (stored === "true" || stored === "false") {
-      setSidebarCollapsed(stored === "true");
-    } else {
-      setSidebarCollapsed(window.matchMedia("(max-width: 1279px)").matches);
-    }
-    setSidebarReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (!sidebarReady) return;
-    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
-  }, [sidebarCollapsed, sidebarReady]);
 
   useEffect(() => {
     try {
@@ -208,11 +152,10 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
 
   const appRole = toAppRole(user.role);
   const menuItems = ROLE_MENUS[appRole].filter(item => effectivePermissions.includes(item.permission));
-  const sidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH;
   const canUseAssistant = effectivePermissions.includes("chatbot.use");
   const currentMenuItem = menuItems.find(item => path === item.href.split("?")[0]);
   const assistantContext = {
-    title: currentMenuItem?.label || "EduVault",
+    title: currentMenuItem?.label || "Kho lưu trữ tri thức",
     lines: [
       `Người dùng: ${user.name} (${user.code})`,
       `Vai trò: ${ROLE_LABELS[appRole]}`,
@@ -222,80 +165,200 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
     ].filter(Boolean),
   };
 
+  // Group menu items for Horizontal Nav
+  const groups: { label: string; items: MenuItem[] }[] = [];
+  const overviewItems = menuItems.filter(item => ["/dashboard", "/search"].includes(item.href.split("?")[0]));
+  const repositoryItems = menuItems.filter(item => ["/repository", "/trash", "/versions", "/knowledge-transfer"].includes(item.href.split("?")[0]));
+  const adminItems = menuItems.filter(item => ["/operations", "/policy", "/governance-rules", "/users", "/permissions", "/backup", "/reports", "/audit-logs"].includes(item.href.split("?")[0]));
+  const aiItems = menuItems.filter(item => ["/assistant"].includes(item.href.split("?")[0]));
+  const profileItems = menuItems.filter(item => ["/profile"].includes(item.href.split("?")[0]));
+
+  if (overviewItems.length > 0) groups.push({ label: "Tổng quan", items: overviewItems });
+  if (repositoryItems.length > 0) groups.push({ label: "Kho tài liệu", items: repositoryItems });
+  if (adminItems.length > 0) groups.push({ label: "Quản trị", items: adminItems });
+  if (aiItems.length > 0) groups.push({ label: "Trợ lý AI", items: aiItems });
+  if (profileItems.length > 0) groups.push({ label: "Cá nhân", items: profileItems });
+
   function submitHeaderSearch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const q = headerQuery.trim();
     router.push(q ? `/search?q=${encodeURIComponent(q)}` : "/search");
   }
 
-  function renderSidebar(collapsed: boolean) {
+  function renderMobileMenu() {
     return (
-      <aside
-        className={`flex h-full max-w-[calc(100vw-32px)] flex-col bg-[var(--sidebar)] text-white transition-[width] duration-200 ease-out ${collapsed ? "w-[72px]" : "w-[304px]"}`}
-        aria-label="Điều hướng EduVault"
-      >
-        <div className={`flex h-[84px] items-center border-b border-white/10 transition-all duration-200 ${collapsed ? "justify-center px-2" : "gap-3 px-6"}`}>
-          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-blue-500"><BookOpenCheck size={22}/></div>
-          {!collapsed && <div className="min-w-0 whitespace-nowrap"><strong className="block text-[17px] font-extrabold leading-5 tracking-normal">EduVault</strong><span className="mt-1 block text-[12px] font-semibold leading-4 text-blue-100/75">Kho tri thức khoa CNTT</span></div>}
-        </div>
-        <nav className={`flex flex-1 flex-col gap-1 py-5 transition-all duration-200 ${collapsed ? "px-2" : "px-4"}`} aria-label="Điều hướng chính">
-          {!collapsed && <p className="px-3 pb-2 text-[10px] font-bold uppercase tracking-[.14em] text-blue-200/60">Không gian làm việc</p>}
-          {menuItems.map((item) => {
-            const Icon = icons[item.icon];
-            const active = path === item.href.split("?")[0];
-            return (
+      <div className="fixed inset-0 z-50 flex lg:hidden">
+        <div className="absolute inset-0 bg-slate-950/60" onClick={() => setMobile(false)}/>
+        <aside className="relative flex h-full w-[280px] flex-col bg-[var(--sidebar)] text-white p-5 space-y-6">
+          <div className="flex items-center justify-between border-b border-white/10 pb-4">
+            <div className="flex items-center gap-2">
+              <img src="/vinuni_logo.png" alt="VinUniversity Logo" className="h-8 w-auto object-contain bg-white p-1 rounded" />
+              <strong className="text-xs font-bold">Tri thức VinUni</strong>
+            </div>
+            <button aria-label="Đóng menu" className="text-white cursor-pointer" onClick={() => setMobile(false)}><X/></button>
+          </div>
+          <nav className="flex-1 overflow-y-auto space-y-4">
+            {groups.map(group => (
+              <div key={group.label} className="space-y-1">
+                <p className="text-[10px] font-bold uppercase tracking-[.14em] text-blue-200/60 px-2">{group.label}</p>
+                {group.items.map(item => {
+                  const active = path === item.href.split("?")[0];
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setMobile(false)}
+                      className={`flex h-10 w-full items-center rounded-lg px-3 text-xs font-semibold transition-colors ${
+                        active ? "bg-blue-500 text-white" : "text-blue-100/75 hover:bg-white/10 hover:text-white"
+                      }`}
+                    >
+                      {item.label}
+                    </Link>
+                  );
+                })}
+              </div>
+            ))}
+            <div className="space-y-1 border-t border-white/10 pt-4">
+              <p className="text-[10px] font-bold uppercase tracking-[.14em] text-blue-200/60 px-2">Hỗ trợ</p>
               <Link
-                key={`${item.permission}:${item.href}`}
-                href={item.href}
-                title={collapsed ? item.label : undefined}
-                aria-label={item.label}
+                href="/support"
                 onClick={() => setMobile(false)}
-                className={`flex h-12 w-full items-center rounded-xl text-[13px] font-semibold transition-colors duration-150 ${collapsed ? "justify-center px-0" : "gap-3 px-3"} ${active ? "bg-blue-500 text-white shadow-lg shadow-blue-950/20" : "bg-transparent text-blue-100/75 hover:bg-white/10 hover:text-white"}`}
+                className="flex h-10 w-full items-center rounded-lg px-3 text-xs font-semibold text-blue-100/75 hover:bg-white/10 hover:text-white text-left"
               >
-                <Icon className="shrink-0" size={18}/>
-                {!collapsed && <span className="truncate whitespace-nowrap">{item.label}</span>}
+                Hỗ trợ
               </Link>
-            );
-          })}
-        </nav>
-      </aside>
+            </div>
+          </nav>
+        </aside>
+      </div>
     );
   }
 
   return (
-    <div className="min-h-screen">
-      <div className="desktop-sidebar fixed inset-y-0 left-0 z-30 transition-[width] duration-200 ease-out" style={{ width: sidebarWidth }}>{renderSidebar(sidebarCollapsed)}</div>
-      {mobile && <div className="fixed inset-0 z-50 flex lg:hidden"><div className="absolute inset-0 bg-slate-950/60" onClick={() => setMobile(false)}/><div className="relative">{renderSidebar(false)}<button aria-label="Đóng menu" className="absolute right-3 top-4 text-white" onClick={() => setMobile(false)}><X/></button></div></div>}
-      <div className="main-offset transition-[margin] duration-200 ease-out" style={{ marginLeft: sidebarWidth }}>
-        <header className="sticky top-0 z-20 flex h-[72px] items-center gap-3 border-b border-[var(--border)] bg-[color:var(--card)]/92 px-4 backdrop-blur md:px-7">
-          <button className="icon-btn sidebar-toggle" aria-label="Mở menu" onClick={() => setMobile(true)}><Menu size={18}/></button>
-          <button className="icon-btn hidden xl:inline-flex" aria-label={sidebarCollapsed ? "Mở rộng thanh điều hướng" : "Thu gọn thanh điều hướng"} title={sidebarCollapsed ? "Mở rộng thanh điều hướng" : "Thu gọn thanh điều hướng"} onClick={() => setSidebarCollapsed(value => !value)}>
-            {sidebarCollapsed ? <ChevronsRight size={17}/> : <ChevronsLeft size={17}/>}
-          </button>
-          <form onSubmit={submitHeaderSearch} className="flex h-10 max-w-xl flex-1 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 text-left text-sm text-[var(--muted)] focus-within:border-blue-300 focus-within:text-blue-700"><Search size={17}/><input className="min-w-0 flex-1 bg-transparent text-sm outline-none" value={headerQuery} onChange={event => setHeaderQuery(event.target.value)} placeholder="Tìm tài liệu, học phần, giảng viên..." /></form>
-          <button className="icon-btn" aria-label="Đổi giao diện" onClick={() => setDark(!dark)}>{dark ? <Sun size={17}/> : <Moon size={17}/>}</button>
+    <div className="min-h-screen flex flex-col bg-[var(--bg)]">
+      <header className="sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-[var(--border)] bg-[color:var(--card)]/92 px-4 backdrop-blur md:px-7 shadow-sm">
+        <div className="flex items-center gap-6">
+          <Link href="/" className="flex items-center gap-2.5 shrink-0 group">
+            <img src="/vinuni_logo.png" alt="VinUniversity Logo" className="h-10 w-auto object-contain transition-transform duration-300 group-hover:scale-105" />
+            <div className="hidden lg:block min-w-0">
+              <strong className="block text-xs font-black text-[#102451] uppercase tracking-wider leading-none">Kho lưu trữ tri thức khoa CNTT</strong>
+            </div>
+          </Link>
+          
+          <nav className="hidden lg:flex items-center gap-1.5" aria-label="Điều hướng ngang">
+            {groups.map((group) => {
+              if (group.items.length === 1) {
+                const item = group.items[0];
+                const active = path === item.href.split("?")[0];
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={`px-3 py-2 text-[13px] font-bold rounded-lg border transition-all ${
+                      active 
+                        ? "border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-400" 
+                        : "border-transparent text-gray-600 dark:text-gray-300 hover:border-blue-300 hover:bg-blue-100/80 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-blue-900/30 dark:hover:text-blue-300"
+                    }`}
+                  >
+                    {item.label}
+                  </Link>
+                );
+              }
+              return (
+                <div key={group.label} className="relative group">
+                  <button className="flex items-center gap-1 px-3 py-2 text-[13px] font-bold text-gray-600 dark:text-gray-300 rounded-lg border border-transparent hover:border-blue-300 hover:bg-blue-100/80 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-blue-900/30 dark:hover:text-blue-300 transition-all cursor-pointer">
+                    <span>{group.label}</span>
+                  </button>
+                  <div className="absolute left-0 top-full opacity-0 invisible translate-y-1 group-hover:opacity-100 group-hover:visible group-hover:translate-y-0 transition-all duration-200 pt-1 z-50">
+                    <div className="bg-white dark:bg-slate-900 border border-[var(--border)] rounded-xl shadow-xl py-1 w-52">
+                      {group.items.map((item) => {
+                        const active = path === item.href.split("?")[0];
+                        return (
+                           <Link
+                             key={item.href}
+                             href={item.href}
+                             className={`block mx-1.5 my-0.5 px-3 py-2 text-xs font-bold rounded-lg border transition-all ${
+                               active 
+                                 ? "border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-400" 
+                                 : "border-transparent text-gray-700 dark:text-gray-200 hover:border-blue-300 hover:bg-blue-100/70 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-slate-800"
+                             }`}
+                           >
+                             {item.label}
+                           </Link>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            <Link
+              href="/support"
+              className={`px-3 py-2 text-[13px] font-bold rounded-lg border transition-all ${
+                path === "/support"
+                  ? "border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-400 font-bold"
+                  : "border-transparent text-gray-600 dark:text-gray-300 hover:border-blue-300 hover:bg-blue-100/80 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-blue-900/30 dark:hover:text-blue-300"
+              }`}
+            >
+              Hỗ trợ
+            </Link>
+          </nav>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <form onSubmit={submitHeaderSearch} className="hidden xl:flex h-10 w-44 md:w-56 lg:w-64 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 text-left text-sm text-[var(--muted)] focus-within:border-blue-300 focus-within:text-blue-700">
+            <Search size={16}/>
+            <input className="min-w-0 flex-1 bg-transparent text-xs outline-none" value={headerQuery} onChange={event => setHeaderQuery(event.target.value)} placeholder="Tìm tài liệu..." />
+          </form>
+          <button className="icon-btn cursor-pointer" aria-label="Đổi giao diện" onClick={() => setDark(!dark)}>{dark ? <Sun size={17}/> : <Moon size={17}/>}</button>
           <UploadNotificationMenu />
-          {canUseAssistant && <button className={assistantOpen ? "btn-primary hidden items-center gap-2 px-3 py-2 text-xs md:inline-flex" : "btn-secondary hidden items-center gap-2 px-3 py-2 text-xs md:inline-flex"} onClick={() => setAssistantOpen(value => !value)} aria-expanded={assistantOpen}><Bot size={15}/>{assistantOpen ? "Đóng AI" : "Trợ lý AI"}</button>}
-          <div className="hidden items-center gap-2 border-l border-[var(--border)] pl-3 sm:flex"><div className="grid h-9 w-9 place-items-center rounded-full bg-blue-600 text-xs font-bold text-white">{user.code.slice(0, 2)}</div><div><strong className="block text-xs">{user.name}</strong><span className="muted text-[10px]">{ROLE_LABELS[appRole]} · {user.code}</span></div><button className="icon-btn ml-1" aria-label="Đăng xuất" onClick={logout}><LogOut size={15}/></button></div>
-        </header>
-        <main className="mx-auto max-w-[1680px] p-4 md:p-7">{children}</main>
-      </div>
-      {canUseAssistant && <>
-        {!assistantOpen && <button
-          className="fixed bottom-5 right-5 z-[70] inline-flex h-12 items-center gap-2 rounded-full bg-blue-600 px-4 text-sm font-bold text-white shadow-xl shadow-blue-950/20 transition hover:bg-blue-700"
-          onClick={() => setAssistantOpen(true)}
-          aria-label="Mở trợ lý AI"
-        >
-          <Bot size={18}/>
-          <span className="hidden sm:inline">Trợ lý AI</span>
-        </button>}
-        {assistantOpen && <div className="fixed inset-0 z-[90] pointer-events-none">
-          <div className="absolute inset-0 bg-slate-950/20 opacity-100 md:hidden pointer-events-auto" onClick={() => setAssistantOpen(false)}/>
-          <aside className="pointer-events-auto absolute inset-y-0 right-0 w-[min(440px,100vw)] border-l border-[var(--border)] bg-[var(--card)] shadow-2xl">
-            <AssistantChat variant="panel" context={assistantContext} onClose={() => setAssistantOpen(false)}/>
-          </aside>
-        </div>}
-      </>}
+          <div className="flex items-center gap-2 border-l border-[var(--border)] pl-3">
+            <div className="grid h-9 w-9 place-items-center rounded-full bg-[#102451] text-xs font-bold text-white shrink-0">
+              {user.code.slice(0, 2)}
+            </div>
+            <div className="hidden md:block text-left">
+              <strong className="block text-xs leading-none">{user.name}</strong>
+              <span className="muted text-[10px] block mt-0.5">{ROLE_LABELS[appRole]}</span>
+            </div>
+            <button className="icon-btn ml-1 cursor-pointer" aria-label="Đăng xuất" onClick={async () => { await logout(); window.location.href = "/"; }}>
+              <LogOut size={15}/>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Mobile Menu Drawer */}
+      {mobile && renderMobileMenu()}
+
+      {/* Main Content Area */}
+      <main className="flex-1 mx-auto w-full max-w-[1680px] p-4 md:p-7">
+        {children}
+      </main>
+
+      {/* Persistent AI Assistant chat sidebar */}
+      {canUseAssistant && (
+        <>
+          {!assistantOpen && (
+            <button
+              className="fixed bottom-5 right-5 z-[70] inline-flex h-12 items-center gap-2 rounded-full bg-[#102451] px-4 text-sm font-bold text-white shadow-xl shadow-blue-950/20 transition hover:bg-[#C92027] cursor-pointer"
+              onClick={() => setAssistantOpen(true)}
+              aria-label="Mở trợ lý AI"
+            >
+              <Bot size={18}/>
+              <span className="hidden sm:inline">Trợ lý AI</span>
+            </button>
+          )}
+          {assistantOpen && (
+            <div className="fixed inset-0 z-[90] pointer-events-none">
+              <div className="absolute inset-0 bg-slate-950/20 opacity-100 md:hidden pointer-events-auto" onClick={() => setAssistantOpen(false)}/>
+              <aside className="pointer-events-auto absolute inset-y-0 right-0 w-[min(440px,100vw)] border-l border-[var(--border)] bg-[var(--card)] shadow-2xl">
+                <AssistantChat variant="panel" context={assistantContext} onClose={() => setAssistantOpen(false)}/>
+              </aside>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

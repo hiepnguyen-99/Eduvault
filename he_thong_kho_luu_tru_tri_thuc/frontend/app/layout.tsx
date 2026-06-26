@@ -3,8 +3,8 @@ import "./globals.css";
 import { AppShell } from "@/components/app-shell";
 
 export const metadata: Metadata = {
-  title: "EduVault | Kho tri thức thông minh",
-  description: "Nền tảng quản lý tri thức học thuật",
+  title: "Kho lưu trữ tri thức VinUni",
+  description: "Nền tảng quản lý tri thức học thuật Đại học VinUniversity",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
