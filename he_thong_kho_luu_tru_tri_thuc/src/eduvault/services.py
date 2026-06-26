@@ -4148,18 +4148,16 @@ def document_metadata_context(document: dict, content: str) -> dict:
 
 
 def format_document_location_answer(document: dict) -> str:
-    folder_path = document.get("folder_path") or "Chưa phân loại"
+    doc_id  = document.get("id") or ""
     doc_type = document.get("doc_type") or document.get("document_type") or "Chưa xác định"
-    topic = document.get("topic") or "Chưa xác định"
-    owner = document.get("owner_code") or "Chưa xác định"
-    title = document.get("title", "tài liệu này")
+    topic   = document.get("topic") or "Chưa xác định"
+    title   = document.get("title", "tài liệu này")
+    vis     = "🔓 Public" if document.get("visibility") == "public" else "🔒 Private"
+    link    = f"/documents/{doc_id}" if doc_id else "/repository"
     return (
-        f"Mình tìm thấy **{title}** trong kho rồi!\n\n"
-        f"📂 Đường dẫn: `{folder_path}`\n\n"
-        f"- Loại: **{doc_type}**\n"
-        f"- Chủ đề: **{topic}**\n"
-        f"- Người sở hữu: **{owner}**\n\n"
-        "Bạn có thể vào trang repository để mở trực tiếp nhé."
+        f"Mình tìm thấy **{title}** trong kho!\n\n"
+        f"📂 **{topic}** · {doc_type} · {vis}\n\n"
+        f"👉 [Mở tài liệu]({link})"
     )
 
 
@@ -4747,41 +4745,96 @@ def _build_action_response(db, user: dict, retrieval_query: str, intent: str, ro
             answer = "\n".join(lines)
 
     elif intent == "storage_suggestion":
-        # Lấy danh sách topic + doc_type phổ biến để gợi ý
-        topics = rows(db.execute(
-            "SELECT topic, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL AND status='INDEXED' "
-            "GROUP BY topic ORDER BY cnt DESC LIMIT 10"
-        ).fetchall())
-        doc_types = rows(db.execute(
-            "SELECT doc_type, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL "
-            "GROUP BY doc_type ORDER BY cnt DESC LIMIT 8"
+        q_lower = strip_accents(retrieval_query).casefold()
+        _stop_words = {"tai", "lieu", "file", "mon", "hoc", "cua", "cho",
+                       "ban", "toi", "nen", "vao", "luu", "xep", "dat", "nay", "noi",
+                       "voi", "kho", "tri", "thuc", "vao", "folder", "dau"}
+        # Cho phép keyword >= 2 ký tự (tiếng Việt gốc Hán nhiều từ ngắn có nghĩa)
+        raw_words = [w for w in q_lower.split() if len(w) >= 2 and w not in _stop_words]
+        # Bigrams để bắt "co so", "hoc may", "lap trinh"...
+        bigrams = [f"{raw_words[i]} {raw_words[i+1]}" for i in range(len(raw_words)-1)]
+        keywords = raw_words + bigrams
+
+        # --- 1. Match course từ cây thư mục (word-boundary safe) ---
+        all_courses = rows(db.execute(
+            "SELECT id, name, path, type FROM folder_nodes "
+            "WHERE type='course' ORDER BY name"
         ).fetchall())
 
-        # Gợi ý dựa trên nội dung câu hỏi
-        q_lower = strip_accents(retrieval_query).casefold()
-        matched_topic = None
-        for t in topics:
-            topic_name = strip_accents(t.get("topic", "")).casefold()
-            if any(word in q_lower for word in topic_name.split() if len(word) > 3):
-                matched_topic = t.get("topic")
+        def _course_score(cname_folded: str) -> int:
+            words = set(cname_folded.split())
+            score = 0
+            for kw in keywords:
+                kw_words = set(kw.split())
+                # Exact word match (not substring) để tránh "thi" match "things"
+                if kw_words & words:
+                    score += len(kw_words)  # bigram match scores higher
+            return score
+
+        scored_courses = []
+        for c in all_courses:
+            cname = strip_accents(c.get("name", "")).casefold()
+            s = _course_score(cname)
+            if s > 0:
+                scored_courses.append((s, c))
+        scored_courses.sort(key=lambda x: x[0], reverse=True)
+
+        # --- 2. Detect loại tài liệu từ câu hỏi ---
+        _type_map = [
+            ("bai giang", "Bài giảng"), ("giao trinh", "Bài giảng"),
+            ("slide", "Slide"), ("de cuong", "Đề cương môn học"),
+            ("de thi", "Đề thi"), ("bai kiem tra", "Đề thi"),
+            ("dap an", "Đáp án"), ("bai tap", "Bài tập"), ("on tap", "Bài tập"),
+            ("lab", "Lab"), ("thuc hanh", "Lab"),
+            ("tai lieu tham khao", "Tài liệu tham khảo"), ("tham khao", "Tài liệu tham khảo"),
+        ]
+        detected_type = None
+        for kw, dtype in _type_map:
+            if kw in q_lower:
+                detected_type = dtype
                 break
 
-        lines = ["**Gợi ý nơi lưu tài liệu:**\n"]
-        if matched_topic:
-            lines.append(f"✅ Dựa trên nội dung, tài liệu này phù hợp nhất với chủ đề **{matched_topic}**\n")
+        # --- 3. Lấy standard folders (distinct) của course ---
+        std_folder_names = []
+        best_course = scored_courses[0][1] if scored_courses else None
+        if best_course:
+            sf_rows = rows(db.execute(
+                "SELECT DISTINCT name FROM folder_nodes WHERE type='standard_folder' "
+                "AND path LIKE ? ORDER BY name",
+                (best_course["path"] + "/%",)
+            ).fetchall())
+            std_folder_names = [r["name"] for r in sf_rows]
 
-        if topics:
-            lines.append("**Các chủ đề hiện có trong kho:**")
-            for t in topics[:6]:
-                cnt = t.get("cnt", 0)
-                lines.append(f"• **{t.get('topic','')}** — {cnt} tài liệu")
+        # --- 4. Build câu trả lời ---
+        lines = []
+        if best_course:
+            course_name = best_course["name"]
+            course_path = best_course["path"]
+            lines.append(f"✅ **Gợi ý lưu vào: {course_name}**")
+            lines.append(f"📂 `{course_path}`\n")
 
-        if doc_types:
-            lines.append("\n**Loại tài liệu thường dùng:**")
-            for d in doc_types[:5]:
-                lines.append(f"• {d.get('doc_type','')}")
+            if detected_type:
+                lines.append(f"📁 Loại tài liệu phù hợp: **{detected_type}**\n")
 
-        lines.append("\n💡 **Cách tải lên:** Kho tri thức → Tải lên → Chọn chủ đề → Điền metadata")
+            if std_folder_names:
+                lines.append("**Thư mục con của môn học này:**")
+                for fname in std_folder_names:
+                    mark = "→" if detected_type == fname else "•"
+                    lines.append(f"  {mark} {fname}")
+
+            if len(scored_courses) > 1:
+                others = [c["name"] for _, c in scored_courses[1:3]]
+                lines.append(f"\n💡 Cũng có thể phù hợp: **{', '.join(others)}**")
+        else:
+            all_course_names = [r["name"] for r in rows(db.execute(
+                "SELECT name FROM folder_nodes WHERE type='course' ORDER BY name LIMIT 20"
+            ).fetchall())]
+            lines.append("Mình chưa xác định được môn học phù hợp. Các môn hiện có trong hệ thống:\n")
+            for name in all_course_names:
+                lines.append(f"• **{name}**")
+            lines.append("\n💡 Hãy mô tả rõ hơn nội dung tài liệu để mình gợi ý chính xác hơn nhé!")
+
+        lines.append("\n👉 [Tải tài liệu lên](/repository)")
         answer = "\n".join(lines)
 
     elif intent == "document_recommendation":
@@ -4825,13 +4878,8 @@ def _build_action_response(db, user: dict, retrieval_query: str, intent: str, ro
             ).fetchall())
             top = chunk_docs
 
-        if not top and all_docs:
-            top = all_docs[:5]
-            lines = ["Mình chưa tìm thấy tài liệu khớp chính xác, dưới đây là một số tài liệu mới nhất:\n"]
-        elif not top:
-            answer = ("Kho chưa có tài liệu phù hợp với yêu cầu của bạn. "
-                      "Hãy thử tìm kiếm với từ khóa khác hoặc nhờ admin bổ sung tài liệu.")
-            top = []
+        if not top:
+            answer = "Hiện tại trong kho chưa tìm thấy tài liệu phù hợp với yêu cầu của bạn."
             lines = []
         else:
             lines = [f"**Tìm thấy {len(top)} tài liệu phù hợp:**\n"]
