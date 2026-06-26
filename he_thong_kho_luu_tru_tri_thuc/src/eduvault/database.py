@@ -530,6 +530,11 @@ CREATE TABLE IF NOT EXISTS search_feedback (
   reason TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
   FOREIGN KEY(user_code) REFERENCES users(code)
 );
+CREATE TABLE IF NOT EXISTS conversation_memory (
+  user_code TEXT PRIMARY KEY, short_term TEXT NOT NULL DEFAULT '[]',
+  long_term TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 """
 
 MYSQL_SCHEMA = """

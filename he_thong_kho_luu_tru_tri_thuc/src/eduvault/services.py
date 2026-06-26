@@ -3777,7 +3777,10 @@ def query_words(queries: list[str]) -> set[str]:
 def classify_query_intent(question: str) -> dict:
     folded = strip_accents(question).casefold()
     # Thống kê / báo cáo — check trước upload_help vì "bao cao tai len" sẽ nhầm upload
-    if any(token in folded for token in ("thong ke", "bao cao", "phan tich so lieu", "so sanh giang vien", "xu huong", "bieu do", "analytics", "dashboard", "so lieu", "hoat dong tai len")):
+    # Loại trừ các tên môn học có chứa "thong ke" (xac suat thong ke, thong ke ung dung, ...)
+    _analytics_tokens = ("bao cao", "phan tich so lieu", "so sanh giang vien", "xu huong", "bieu do", "analytics", "dashboard", "so lieu", "hoat dong tai len")
+    _thong_ke_subject = any(s in folded for s in ("xac suat thong ke", "thong ke ung dung", "thong ke mo ta", "mon thong ke", "hoc phan thong ke", "tai lieu thong ke", "tim thong ke", "bai giang thong ke", "de cuong thong ke", "slide thong ke"))
+    if any(token in folded for token in _analytics_tokens) or ("thong ke" in folded and not _thong_ke_subject):
         label = "analytics_query"
     # Tài liệu của chính mình — check trước upload_help vì "da upload" sẽ nhầm upload_help
     elif any(token in folded for token in ("tai lieu cua toi", "file cua toi", "cua minh", "toi da tai", "da upload", "ban than minh", "cua ban than", "toi da up", "nhung file nao")):
@@ -3786,7 +3789,7 @@ def classify_query_intent(question: str) -> dict:
     elif any(token in folded for token in ("chuyen giao", "ban giao", "ke thua", "tiep nhan", "handover", "transfer", "nguoi thay the")):
         label = "knowledge_transfer"
     # Upload / hướng dẫn tải lên
-    elif any(token in folded for token in ("upload", "tai len", "dang tai", "up file", "lam sao de up", "huong dan tai", "huong dan upload", "cach tai len", "cach tai ", "cach upload", "lam sao tai")):
+    elif any(token in folded for token in ("upload", "tai len", "dang tai", "up file", "lam sao de up", "huong dan tai", "huong dan upload", "cach tai len", "cach tai ", "cach upload", "lam sao tai", "lam sao de tai", "muon tai len", "can tai len", "dua len he thong", "them tai lieu vao")):
         label = "upload_help"
     elif is_location_query(question):
         label = "document_location"
@@ -4162,7 +4165,439 @@ def _extract_actual_question(text: str) -> str:
     return text.strip()
 
 
+def _build_memory_question(question: str, short_term: list[str], long_term: list[str]) -> str:
+    """Inject server-side memory into question for LLM context."""
+    parts = []
+    if long_term:
+        parts.append("Bộ nhớ dài hạn:\n" + "\n".join(f"- {e}" for e in long_term[-6:]))
+    if short_term:
+        parts.append("Bộ nhớ ngắn hạn:\n" + "\n".join(f"- {e}" for e in short_term[-4:]))
+    clean = _extract_actual_question(question)
+    parts.append(f"Câu hỏi của người dùng: {clean}")
+    return "\n\n".join(parts)
+
+
+def _run_retrieval(db, user: dict, retrieval_query: str, filters: dict | None) -> tuple:
+    """Hybrid retrieval pipeline. Returns (candidates, config, rewritten_query, expanded_terms, sub_queries)."""
+    allowed = {document["id"]: document for document in rag_documents(db, user)}
+    config = search_policy(db)
+    rewritten_query = rewrite_query(retrieval_query)
+    sub_queries = decompose_query(rewritten_query, config)
+    expanded_terms = expanded_query_terms(" ".join(sub_queries), config)
+    query_vectors: dict[str, list[float]] = {}
+    words = query_words(expanded_terms + sub_queries)
+    filtered_allowed = {
+        doc_id: doc for doc_id, doc in allowed.items() if metadata_matches(doc, filters)
+    }
+
+    requested_provider = _retrieval_provider()
+    provider_used = requested_provider
+    fallback_used = False
+    fallback_reason = ""
+    candidate_count = 0
+    filtered_count = 0
+    vector_matches: list = []
+    retrieval_started = time.perf_counter()
+
+    if requested_provider == "qdrant" and qdrant_enabled():
+        try:
+            top_k = max(1, int(os.getenv("QDRANT_TOP_K", "100")))
+            query_vector = ai_provider.embed(" ".join(expanded_terms))
+            hits = search_vectors(query_vector, user["code"], limit=top_k)
+            candidate_count = len(hits)
+            for hit in hits:
+                payload = hit.get("payload") or {}
+                document_id = payload.get("document_id")
+                document = filtered_allowed.get(document_id)
+                if not document:
+                    continue
+                chunk_id = payload.get("chunk_id")
+                chunk = db.execute(
+                    "SELECT content FROM chunks WHERE id=? AND document_id=?",
+                    (chunk_id, document_id),
+                ).fetchone()
+                if not chunk:
+                    continue
+                content = chunk["content"]
+                similarity = float(hit.get("score") or 0.0) * 4.0
+                lexical = lexical_score(words, document, content)
+                hybrid = similarity * float(config.get("vector_weight", 0.38)) + lexical * float(config.get("lexical_weight", 0.62))
+                vector_matches.append((hybrid, document, content))
+                filtered_count += 1
+            if not vector_matches:
+                fallback_used = True
+                fallback_reason = "no_usable_qdrant_results"
+                provider_used = "database"
+        except Exception as exc:
+            print(json.dumps({"event": "QDRANT_RETRIEVAL_WARNING", "error": str(exc)}, ensure_ascii=True))
+            fallback_used = True
+            fallback_reason = str(exc)
+            provider_used = "database"
+    else:
+        fallback_used = requested_provider == "qdrant"
+        fallback_reason = "qdrant_disabled" if fallback_used else ""
+        provider_used = "database"
+
+    if provider_used == "database":
+        for chunk in db.execute("SELECT * FROM chunks").fetchall():
+            document = filtered_allowed.get(chunk["document_id"])
+            if not document:
+                continue
+            candidate_count += 1
+            provider = chunk["provider"]
+            if provider not in query_vectors:
+                query_vectors[provider] = ai_provider.embed(" ".join(expanded_terms), force_local=provider == "local")
+            query_vector = query_vectors[provider]
+            vector = json.loads(chunk["vector"])
+            similarity = sum(a * b for a, b in zip(query_vector, vector))
+            lexical = lexical_score(words, document, chunk["content"])
+            hybrid = similarity * float(config.get("vector_weight", 0.38)) + lexical * float(config.get("lexical_weight", 0.62))
+            vector_matches.append((hybrid, document, chunk["content"]))
+            filtered_count += 1
+
+    _log_retrieval_metrics(provider_used, retrieval_started, candidate_count, filtered_count, fallback_used)
+    if requested_provider == "qdrant" and fallback_used:
+        audit(db, user["code"], "rag.qdrant_fallback", "query", None, {
+            "question": retrieval_query,
+            "reason": fallback_reason,
+            "candidate_count": candidate_count,
+            "filtered_count": filtered_count,
+        })
+
+    # Lexical fallback
+    scored: list = []
+    for doc in filtered_allowed.values():
+        content = content_for(db, doc)
+        score = lexical_score(words, doc, content)
+        if score:
+            scored.append((score, doc, content))
+    scored = merge_ranked_matches(scored)
+    vector_matches = merge_ranked_matches([item for item in vector_matches if item[0] > 0])
+
+    candidates = merge_ranked_matches(vector_matches + scored)[: int(config.get("top_k", 8))]
+    return candidates, config, rewritten_query, expanded_terms, sub_queries
+
+
+def _run_rerank(candidates: list, intent_meta: dict, config: dict, retrieval_query: str) -> tuple:
+    """Score, filter, rerank candidates. Returns (matches, trace_fragment)."""
+    expanded = [retrieval_query]
+    words = query_words(expanded)
+
+    reranked = [
+        (rerank_score(score, words, document, content, config), document, content)
+        for score, document, content in candidates
+    ]
+    reranked = merge_ranked_matches(reranked)[: int(config.get("rerank_k", 5))]
+    filtered = [(s, d, c) for s, d, c in reranked if _matches_query_intent(d, c, intent_meta)]
+
+    _NON_TEACHING_TYPES = {"tài liệu khác", "tai lieu khac", "cv", "hồ sơ", "ho so"}
+    if intent_meta.get("label") in ("topic_search", "document_lookup", "own_document_lookup"):
+        filtered_teaching = [item for item in filtered if strip_accents(str(item[1].get("doc_type") or "")).casefold() not in _NON_TEACHING_TYPES]
+        filtered = filtered_teaching if filtered_teaching else filtered
+
+    if filtered:
+        top_score = filtered[0][0]
+        threshold = max(float(config.get("confidence_threshold", 0.3)), top_score * 0.35)
+        matches = [item for item in filtered if item[0] >= threshold][:3]
+    elif intent_meta.get("wants_books") or intent_meta.get("wants_exam") or intent_meta.get("wants_ai"):
+        matches = []
+    else:
+        min_fallback_score = float(config.get("min_fallback_score", 3.0))
+        # Reuse lexical from candidates (already scored)
+        matches = [item for item in candidates if item[0] >= min_fallback_score][:3]
+
+    trace_fragment = {
+        "retrieved": [{"id": d["id"], "score": round(float(s), 4), "title": d["title"]} for s, d, _ in reranked],
+        "reranked": [{"id": d["id"], "score": round(float(s), 4), "title": d["title"]} for s, d, _ in matches],
+    }
+    return matches, trace_fragment
+
+
+def _build_oos_response(db, user: dict, retrieval_query: str, reason: str | None, role: str) -> dict:
+    """Build out-of-scope answer dict."""
+    trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+    db.execute(
+        "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (trace_id, user["code"], retrieval_query, retrieval_query, "out_of_scope", "[]", "[]", now()),
+    )
+    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": retrieval_query, "matches": 0, "scope": "public_or_owned", "intent": "out_of_scope"})
+    if reason == "opinion":
+        answer = (
+            "Mình chỉ hỗ trợ **tìm kiếm và tra cứu tài liệu** trong kho EduVault.\n\n"
+            "Câu hỏi xin ý kiến hoặc đánh giá cá nhân nằm ngoài khả năng của mình.\n\n"
+            "**Bạn có thể thử:**\n"
+            "• Tìm kiếm tài liệu liên quan đến chủ đề bạn quan tâm\n"
+            "• Hỏi về nội dung cụ thể trong tài liệu có sẵn"
+        )
+    elif reason == "meta":
+        answer = (
+            "Mình không thể tự đánh giá độ chính xác của câu trả lời vừa đưa ra.\n\n"
+            "**Gợi ý:** Hãy kiểm tra trực tiếp tài liệu gốc được trích dẫn ở phần **Nguồn tham khảo** phía trên."
+        )
+    else:
+        answer = (
+            "Câu hỏi này nằm ngoài phạm vi của mình.\n\n"
+            "Mình chỉ hỗ trợ tìm kiếm **tài liệu học thuật** trong kho EduVault của khoa.\n\n"
+            "**Bạn có thể thử:**\n"
+            "• Tìm tài liệu theo tên môn học\n"
+            "• Tra cứu đề cương, bài giảng, hoặc tài liệu tham khảo"
+        )
+    return {
+        "answer": answer, "citations": [], "intent": "out_of_scope",
+        "trace_id": trace_id,
+        "trace": {"original_query": retrieval_query, "intent": {"label": "out_of_scope"}, "retrieved": [], "reranked": []},
+        "verification": {"status": "out_of_scope", "message": "Câu hỏi nằm ngoài phạm vi hệ thống."},
+        "suggested_actions": _suggested_actions_for("document_lookup", role),
+        "pipeline": ["oos_check"],
+    }
+
+
+def _build_conversational_response(db, user: dict, retrieval_query: str, role: str) -> dict:
+    """Answer greetings / chitchat without retrieval."""
+    import hashlib as _hl
+    h = int(_hl.md5(retrieval_query.encode()).hexdigest(), 16)
+    greetings = [
+        "Xin chào! Mình là trợ lý AI của EduVault — sẵn sàng giúp bạn tìm tài liệu và hỏi đáp về kho tri thức. Bạn cần gì nhỉ?",
+        "Chào bạn! Bạn muốn tìm tài liệu gì hay hỏi về kho tri thức hôm nay?",
+        "Hi! Mình ở đây để hỗ trợ tìm tài liệu trong EduVault. Bạn cần mình giúp gì?",
+    ]
+    answer = greetings[h % len(greetings)]
+    trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+    return {
+        "answer": answer, "citations": [], "intent": "greeting",
+        "trace_id": trace_id, "trace": {}, "verification": {"status": "conversational"},
+        "suggested_actions": _suggested_actions_for("document_lookup", role),
+        "pipeline": ["conversational"],
+    }
+
+
+def _build_system_response(db, user: dict, question: str, retrieval_query: str,
+                           intent: str, role: str, role_ctx: str) -> dict:
+    """Answer system/help questions with specialized prompts or static guides."""
+    trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+    db.execute(
+        "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (trace_id, user["code"], retrieval_query, retrieval_query, intent, "[]", "[]", now()),
+    )
+    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": retrieval_query, "matches": 0, "scope": "public_or_owned", "intent": intent})
+
+    # Static guides for each system intent
+    static_answers: dict[str, str] = {
+        "upload_help": (
+            "Để tải tài liệu lên kho, bạn làm theo các bước sau:\n\n"
+            "1. Vào **Kho tri thức** → nhấn **Tải lên** (hoặc kéo thả file vào vùng upload)\n"
+            "2. Chọn file (PDF, DOCX, PPTX, TXT...)\n"
+            "3. Điền thông tin: **tên tài liệu**, **loại**, **chủ đề** (hệ thống gợi ý tự động)\n"
+            "4. Chọn quyền truy cập: **Public** (cả khoa xem) hoặc **Private** (chỉ mình)\n"
+            "5. Nhấn **Xác nhận** — hệ thống sẽ xử lý và lập chỉ mục trong vài phút\n\n"
+            "💡 File cần được admin duyệt trước khi xuất hiện trong kết quả tìm kiếm của người khác."
+        ),
+        "policy_management": (
+            "Quản lý policy (cây thư mục khoa) cần quyền **Admin**.\n\n"
+            "**Thao tác chính:**\n"
+            "• Xem cấu trúc: vào **Quản trị** → **Policy**\n"
+            "• Thêm chuyên ngành/môn học: nhấn **Chỉnh sửa cây** → thêm node\n"
+            "• Upload file policy (JSON/YAML): hệ thống AI sẽ parse tự động\n\n"
+            "Nếu bạn không thấy menu **Quản trị**, hãy liên hệ admin để được cấp quyền."
+        ),
+        "user_management": (
+            "Quản lý người dùng cần quyền **Admin**.\n\n"
+            "**Thao tác chính:**\n"
+            "• Thêm giảng viên: **Quản trị** → **Người dùng** → **Thêm mới** (theo mã GV)\n"
+            "• Phân quyền: chọn tài khoản → **Chỉnh sửa quyền**\n"
+            "• Vô hiệu hóa: chuyển trạng thái **Active** → **Inactive**\n\n"
+            "EduVault không có đăng ký công khai — tài khoản do admin cấp theo mã giảng viên."
+        ),
+        "onboarding_guide": (
+            "Chào mừng bạn đến với EduVault! Để bắt đầu:\n\n"
+            "1. **Khám phá kho**: vào **Kho tri thức** để xem tài liệu của khoa\n"
+            "2. **Tìm kiếm**: dùng thanh tìm kiếm hoặc hỏi trợ lý AI\n"
+            "3. **Tải tài liệu lên**: nhấn **Tải lên** → chọn file → điền metadata\n"
+            "4. **Đặt quyền truy cập**: Public hoặc Private cho từng tài liệu\n"
+            "5. **Đồng bộ OneDrive**: vào **Đồng bộ** để kết nối tài liệu từ cloud\n\n"
+            "Bạn cần hỗ trợ thêm bước nào không?"
+        ),
+        "system_status": (
+            "Để kiểm tra trạng thái hệ thống:\n\n"
+            "• **Tổng quan**: vào **Tổng quan** để xem số lượng tài liệu, hoạt động gần đây\n"
+            "• **Tài liệu đang xử lý**: trong kho, tài liệu có nhãn **Đang xử lý** là đang lập chỉ mục\n"
+            "• **Lịch sử đồng bộ**: vào **Đồng bộ** → **Lịch sử** để kiểm tra sync\n\n"
+            "Nếu tài liệu bị kẹt ở trạng thái xử lý quá 10 phút, hãy thử tải lại trang hoặc liên hệ admin."
+        ),
+    }
+
+    # Try LLM for richer answers if available
+    static = static_answers.get(intent)
+    if static and not ai_provider.api_key:
+        answer = static
+    elif ai_provider.api_key:
+        system_instructions = (
+            f"Bạn là trợ lý AI của EduVault — hệ thống kho tri thức đại học.\n"
+            f"Người dùng hỏi về: {intent.replace('_', ' ')}.\n"
+            f"Ngữ cảnh người dùng: {role_ctx}\n"
+            f"Trả lời cụ thể, ngắn gọn, thân thiện bằng tiếng Việt. Dùng bullet nếu có nhiều bước.\n"
+            f"Chỉ trả lời trong phạm vi hệ thống EduVault."
+        )
+        fallback_text = static or "Mình chưa có thông tin chi tiết cho câu hỏi này. Hãy liên hệ admin hệ thống để được hỗ trợ."
+        prompts = policy_value(db, "ai_prompts", {})
+        answer = ai_provider.answer(
+            question, [],
+            fallback_text,
+            clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_ctx=role_ctx) + "\n" + system_instructions,
+        )
+        if not answer or is_insufficient_response(answer):
+            answer = fallback_text
+    else:
+        answer = static or "Mình chưa có thông tin chi tiết cho câu hỏi này. Hãy liên hệ admin hệ thống để được hỗ trợ."
+
+    return {
+        "answer": answer, "citations": [], "intent": intent,
+        "trace_id": trace_id, "trace": {"original_query": retrieval_query, "intent": {"label": intent}},
+        "verification": {"status": "system_knowledge"},
+        "suggested_actions": _suggested_actions_for(intent, role),
+        "pipeline": ["router", "system_agent"],
+    }
+
+
+def _build_rag_response(db, user: dict, question: str, retrieval_query: str,
+                        intent_meta: dict, matches: list, candidates: list,
+                        config: dict, role: str, role_ctx: str, trace: dict) -> dict:
+    """Build RAG answer dict from scored matches (extracted from ask())."""
+    intent = intent_meta
+    rewritten_query = trace.get("rewritten_query", retrieval_query)
+    trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+    db.execute(
+        "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (trace_id, user["code"], retrieval_query, rewritten_query, intent["label"],
+         json.dumps(trace.get("retrieved", []), ensure_ascii=False),
+         json.dumps(trace.get("reranked", []), ensure_ascii=False), now()),
+    )
+    audit(db, user["code"], "rag.ask", "query", trace_id, {"question": retrieval_query, "matches": len(matches), "scope": "public_or_owned", "intent": intent["label"]})
+
+    if not matches:
+        not_indexed_docs = rows(db.execute(
+            "SELECT * FROM documents WHERE deleted_at IS NULL AND status != 'INDEXED' AND (visibility='public' OR owner_code=?)",
+            (user["code"],)
+        ).fetchall())
+        words = query_words([retrieval_query])
+        matching_not_indexed_doc = next(
+            (doc for doc in not_indexed_docs if any(len(w) >= 2 and w in doc["title"].lower() for w in words)),
+            None
+        )
+        if matching_not_indexed_doc:
+            doc_title = matching_not_indexed_doc.get("title", "")
+            owner = matching_not_indexed_doc.get("owner_code", "")
+            updated_at = format_date_vietnamese(matching_not_indexed_doc.get("updated_at", ""))
+            friendly_answer = (
+                "⚠️ Tài liệu đã được tải lên nhưng chưa sẵn sàng để tra cứu.\n\n"
+                f"**Tên tài liệu:** {doc_title}\n\n"
+                "Vui lòng đợi hệ thống hoàn tất xử lý hoặc thử lại sau vài phút.\n\n"
+                f"**Nguồn:**\n📄 {doc_title}\n👤 {owner}\n🕒 {updated_at}"
+            )
+        else:
+            friendly_answer = (
+                "⚠️ Chưa tìm thấy tài liệu phù hợp trong phạm vi bạn được phép truy cập.\n\n"
+                "**Bạn có thể thử:**\n"
+                "• Tìm theo tên môn học đầy đủ\n"
+                "• Tìm theo học kỳ hoặc năm học\n"
+                "• Kiểm tra tài liệu đã được tải lên hệ thống chưa"
+            )
+        return {
+            "answer": friendly_answer, "citations": [],
+            "intent": intent["label"], "trace_id": trace_id, "trace": trace,
+            "verification": {"status": "insufficient_evidence", "message": "Không đủ căn cứ từ tài liệu được phép truy cập."},
+            "suggested_actions": _suggested_actions_for(intent["label"], role),
+            "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "no_match"],
+        }
+
+    if intent["label"] == "document_location":
+        selected_match = select_metadata_match(question, candidates, matches)
+        location_matches = prioritize_match(selected_match, matches)
+        answer = format_document_location_answer(selected_match[1])
+        top_score = selected_match[0] if selected_match else 0
+        return {
+            "answer": answer,
+            "citations": [citation_for(s, d, c) for s, d, c in location_matches],
+            "intent": intent["label"], "trace_id": trace_id, "trace": trace,
+            "verification": {"status": "grounded" if top_score >= float(config.get("confidence_threshold", 0.3)) else "weak_evidence",
+                             "message": "Cau tra loi lay truc tiep tu metadata tai lieu."},
+            "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "metadata_answer", "cite", "verify"],
+            "suggested_actions": _suggested_actions_for(intent["label"], role),
+        }
+
+    if intent["label"] == "topic_search":
+        structured = format_topic_search_answer(question, matches)
+        if structured:
+            return {
+                "answer": structured,
+                "citations": [citation_for(s, d, c) for s, d, c in matches],
+                "intent": intent["label"], "trace_id": trace_id, "trace": trace,
+                "verification": {"status": "grounded", "message": "Tổng hợp từ tài liệu trong kho."},
+                "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "structured_answer"],
+                "suggested_actions": _suggested_actions_for(intent["label"], role),
+            }
+
+    # LLM answer
+    fallback = conversational_fallback(question, matches)
+    prompts = policy_value(db, "ai_prompts", {})
+    answer = ai_provider.answer(
+        question,
+        [document_metadata_context(doc, content) for _, doc, content in matches],
+        fallback,
+        clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_ctx=role_ctx),
+    )
+
+    ocr_failed_matches = [(s, d, c) for s, d, c in matches if "TEXT_EXTRACTION_INSUFFICIENT" in c or d.get("status") == "TEXT_EXTRACTION_INSUFFICIENT"]
+    if ocr_failed_matches:
+        doc = ocr_failed_matches[0][1]
+        doc_title = doc.get("title", "")
+        owner = doc.get("owner_code", "")
+        updated_at = format_date_vietnamese(doc.get("updated_at", ""))
+        answer = (
+            "⚠️ Đã tìm thấy tài liệu liên quan\n\n"
+            f"**Tên tài liệu:** {doc_title}\n\n"
+            "Hiện tại hệ thống chưa đọc được nội dung tài liệu nên chưa thể trả lời chi tiết.\n\n"
+            "**Bạn có thể:**\n• OCR lại tài liệu\n• Tải lên bản PDF có thể chọn được chữ\n• Tải lên DOCX/TXT\n\n"
+            f"**Nguồn:**\n📄 {doc_title}\n👤 {owner}\n🕒 {updated_at}"
+        )
+    elif not answer or is_insufficient_response(answer):
+        sources_list = [
+            f"📄 {d.get('title','')}\n👤 {d.get('owner_code','')}\n🕒 {format_date_vietnamese(d.get('updated_at',''))}"
+            for _, d, _ in matches[:3]
+        ]
+        answer = (
+            "⚠️ Mình chưa có đủ thông tin để trả lời chính xác câu hỏi này từ kho tri thức hiện tại.\n\n"
+            "**Nguồn:**\n" + "\n\n".join(sources_list)
+        )
+    else:
+        answer = sanitize_technical_terms(answer)
+        answer = ensure_conversational_format(answer, question)
+
+    top_score = matches[0][0] if matches else 0
+    return {
+        "answer": answer,
+        "citations": [citation_for(s, d, c) for s, d, c in matches],
+        "intent": intent["label"], "trace_id": trace_id, "trace": trace,
+        "verification": {
+            "status": "grounded" if top_score >= float(config.get("confidence_threshold", 1.0)) else "weak_evidence",
+            "message": "Câu trả lời có nguồn tham chiếu." if matches else "Không đủ căn cứ.",
+        },
+        "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "compress", "ground", "cite", "verify"],
+        "suggested_actions": _suggested_actions_for(intent["label"], role),
+    }
+
+
 def ask(db, user: dict, question: str, filters: dict | None = None, current_page: str | None = None) -> dict:
+    """Entry point — delegates to the LangGraph multi-agent pipeline."""
+    from eduvault.agent import run_agent
+    return run_agent(
+        services_module=__import__("eduvault.services", fromlist=["services"]),
+        db=db, user=user, question=question, filters=filters, current_page=current_page,
+    )
+
+
+def _ask_legacy(db, user: dict, question: str, filters: dict | None = None, current_page: str | None = None) -> dict:
+    """Legacy monolithic ask() kept for reference — no longer called."""
     # Use clean question for retrieval; keep full string (with memory/context) for LLM
     retrieval_query = _extract_actual_question(question)
     role = user.get("role", "lecturer")
@@ -4514,6 +4949,38 @@ def ask(db, user: dict, question: str, filters: dict | None = None, current_page
         "pipeline": ["rewrite", "expand", "route", "bm25", "vector", "hybrid", "rerank", "compress", "ground", "cite", "verify"],
         "suggested_actions": _suggested_actions_for(intent["label"], role),
     }
+
+
+def get_conversation_memory(db, user_code: str) -> dict:
+    """Load server-side short/long-term memory for a user."""
+    try:
+        row = db.execute("SELECT short_term, long_term FROM conversation_memory WHERE user_code=?", (user_code,)).fetchone()
+        if not row:
+            return {"short_term": [], "long_term": []}
+        return {"short_term": json.loads(row["short_term"] or "[]"), "long_term": json.loads(row["long_term"] or "[]")}
+    except Exception:
+        return {"short_term": [], "long_term": []}
+
+
+def update_conversation_memory(db, user_code: str, question: str, answer: str) -> None:
+    """Persist Q&A turn to server-side memory; keep last 8 short-term, last 12 long-term."""
+    try:
+        memory = get_conversation_memory(db, user_code)
+        entry = f"Q: {question[:120]} → {answer[:250]}"
+        short_term = (memory["short_term"] + [entry])[-8:]
+        # Long-term: only store turns that contain factual/navigational info (skip fallbacks)
+        factual_signals = ("tài liệu", "đường dẫn", "folder", "tải lên", "policy", "kho", "file")
+        if any(s in answer.lower() for s in factual_signals):
+            long_term = (memory["long_term"] + [entry])[-12:]
+        else:
+            long_term = memory["long_term"]
+        db.execute(
+            "INSERT INTO conversation_memory(user_code,short_term,long_term,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(user_code) DO UPDATE SET short_term=excluded.short_term, long_term=excluded.long_term, updated_at=excluded.updated_at",
+            (user_code, json.dumps(short_term, ensure_ascii=False), json.dumps(long_term, ensure_ascii=False), now()),
+        )
+    except Exception:
+        pass
 
 
 def format_topic_search_answer(question: str, matches: list[tuple]) -> str | None:

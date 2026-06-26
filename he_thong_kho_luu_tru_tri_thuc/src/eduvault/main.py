@@ -1797,6 +1797,22 @@ def search_global(q: str = "", user: dict = Depends(current_user)):
         return global_knowledge_search(db, user, q)
 
 
+@app.get("/api/assistant/memory")
+def get_assistant_memory(user: dict = Depends(current_user)):
+    """Return server-side conversation memory for the current user."""
+    with connection() as db:
+        from eduvault.services import get_conversation_memory
+        return get_conversation_memory(db, user["code"])
+
+
+@app.delete("/api/assistant/memory", status_code=204)
+def clear_assistant_memory(user: dict = Depends(current_user)):
+    """Clear server-side conversation memory for the current user."""
+    with connection() as db:
+        db.execute("DELETE FROM conversation_memory WHERE user_code=?", (user["code"],))
+    return None
+
+
 @app.get("/api/trash")
 def trash(user: dict = Depends(current_user)):
     with connection() as db:

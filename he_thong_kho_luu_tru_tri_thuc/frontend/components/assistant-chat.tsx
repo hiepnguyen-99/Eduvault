@@ -201,6 +201,7 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
   const [preview, setPreview] = useState<DocPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [memory, setMemory] = useState<AssistantMemory>({ shortTerm: [], longTerm: [], updatedAt: Date.now() });
+  const [serverMemory, setServerMemory] = useState<{short_term: string[]; long_term: string[]} | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const loadedKey = useRef("");
@@ -277,7 +278,19 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
 
   function clearMemory() {
     setMemory({ shortTerm: [], longTerm: [], updatedAt: Date.now() });
+    setServerMemory(null);
     setMemoryOpen(false);
+    fetch("/api/assistant/memory", { method: "DELETE" }).catch(() => {});
+  }
+
+  function openMemoryPanel() {
+    setMemoryOpen(v => !v);
+    if (!memoryOpen) {
+      fetch("/api/assistant/memory")
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) setServerMemory(data); })
+        .catch(() => {});
+    }
   }
 
   function createNew() {
@@ -424,7 +437,7 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
         <p className="muted mt-0.5 truncate text-[11px]">{context?.title || "Hỏi đáp trên kho tri thức được phép truy cập"}</p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <button className={memoryOpen ? "btn-secondary h-8 px-2 text-[11px] text-blue-700" : "btn-secondary h-8 px-2 text-[11px]"} title="Bộ nhớ trợ lý" aria-label="Bộ nhớ trợ lý" onClick={() => setMemoryOpen(value => !value)}><MessageSquare size={13}/>Bộ nhớ</button>
+        <button className={memoryOpen ? "btn-secondary h-8 px-2 text-[11px] text-blue-700" : "btn-secondary h-8 px-2 text-[11px]"} title="Bộ nhớ trợ lý" aria-label="Bộ nhớ trợ lý" onClick={openMemoryPanel}><MessageSquare size={13}/>Bộ nhớ</button>
         <button className="icon-btn h-8 w-8" title="Cuộc hội thoại mới" aria-label="Cuộc hội thoại mới" onClick={createNew}><Plus size={14}/></button>
         <button className="icon-btn h-8 w-8" title="Xóa nội dung chat" aria-label="Xóa nội dung chat" onClick={clearActive}><Trash2 size={14}/></button>
         {onClose && <button className="icon-btn h-8 w-8" title="Đóng trợ lý" aria-label="Đóng trợ lý" onClick={onClose}><X size={15}/></button>}
@@ -443,12 +456,12 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
         <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-2">
-          <span className="muted font-semibold">Ngắn hạn</span>
-          <p className="mt-1 line-clamp-3">{memory.shortTerm.slice(-4).join(" · ") || "Chưa có nội dung."}</p>
+          <span className="muted font-semibold">🧠 Ngắn hạn (server)</span>
+          <p className="mt-1 line-clamp-4 whitespace-pre-wrap">{(serverMemory?.short_term ?? []).slice(-4).join("\n") || "Chưa có nội dung."}</p>
         </div>
         <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-2">
-          <span className="muted font-semibold">Dài hạn</span>
-          <p className="mt-1 line-clamp-3">{memory.longTerm.slice(-4).join(" · ") || "Chưa có nội dung."}</p>
+          <span className="muted font-semibold">📚 Dài hạn (server)</span>
+          <p className="mt-1 line-clamp-4 whitespace-pre-wrap">{(serverMemory?.long_term ?? []).slice(-4).join("\n") || "Chưa có nội dung."}</p>
         </div>
       </div>
     </div>}
