@@ -3775,58 +3775,187 @@ def query_words(queries: list[str]) -> set[str]:
     return words
 
 
-def classify_query_intent(question: str) -> dict:
+def classify_query_intent(question: str) -> dict:  # noqa: C901
     folded = strip_accents(question).casefold()
-    # Greeting / chitchat — check first, short-circuit
-    _greeting_exact = {"xin chao", "chao", "hello", "hi", "hey", "chao ban", "chao tro ly", "chao ai"}
-    if folded.strip() in _greeting_exact or any(folded.startswith(g) for g in ("xin chao", "chao ban", "hello ", "hi ")):
+
+    # ── 1. Greeting / chitchat ────────────────────────────────────────────────
+    _greeting_exact = {"xin chao", "chao", "hello", "hi", "hey", "chao ban", "chao tro ly", "chao ai", "good morning", "good afternoon", "alo"}
+    if folded.strip() in _greeting_exact or any(
+        folded.startswith(g) for g in ("xin chao", "chao ban", "hello ", "hi ", "hey ", "alo ")
+    ):
         return {"label": "greeting", "confidence": 1.0}
-    # Thống kê / báo cáo — check trước upload_help vì "bao cao tai len" sẽ nhầm upload
-    # Loại trừ các tên môn học có chứa "thong ke" (xac suat thong ke, thong ke ung dung, ...)
-    _analytics_tokens = ("bao cao", "phan tich so lieu", "so sanh giang vien", "xu huong", "bieu do", "analytics", "dashboard", "so lieu", "hoat dong tai len")
-    _thong_ke_subject = any(s in folded for s in ("xac suat thong ke", "thong ke ung dung", "thong ke mo ta", "mon thong ke", "hoc phan thong ke", "tai lieu thong ke", "tim thong ke", "bai giang thong ke", "de cuong thong ke", "slide thong ke"))
-    if any(token in folded for token in _analytics_tokens) or ("thong ke" in folded and not _thong_ke_subject):
+
+    _chitchat_tokens = (
+        "ban co khoe", "hom nay the nao", "lam gi do", "thu gian", "noi chuyen", "ban la ai",
+        "ban ten la gi", "tro ly ten gi", "ban duoc tao ra", "ai tao ra ban", "ban thong minh",
+        "ban co the lam gi", "ban gioi khong", "ban dep trai", "ban xinh",
+    )
+    if any(t in folded for t in _chitchat_tokens):
+        return {"label": "chitchat", "confidence": 1.0}
+
+    # ── 2. Thống kê / báo cáo ────────────────────────────────────────────────
+    _analytics_tokens = (
+        "bao cao", "phan tich so lieu", "so sanh giang vien", "xu huong", "bieu do",
+        "analytics", "dashboard", "so lieu", "hoat dong tai len", "bao nhieu giang vien",
+        "bao nhieu tai lieu", "tong so", "thong ke toan bo", "thong ke he thong",
+        "thong ke khoa", "bao nhieu nguoi dung", "ty le", "top tai lieu",
+    )
+    _thong_ke_subject = any(s in folded for s in (
+        "xac suat thong ke", "thong ke ung dung", "thong ke mo ta", "mon thong ke",
+        "hoc phan thong ke", "tai lieu thong ke", "tim thong ke", "bai giang thong ke",
+        "de cuong thong ke", "slide thong ke", "thong ke toan", "phan phoi xac suat",
+    ))
+    if any(t in folded for t in _analytics_tokens) or ("thong ke" in folded and not _thong_ke_subject):
         label = "analytics_query"
-    # Tài liệu của chính mình — check trước upload_help vì "da upload" sẽ nhầm upload_help
-    elif any(token in folded for token in ("tai lieu cua toi", "file cua toi", "cua minh", "toi da tai", "da upload", "ban than minh", "cua ban than", "toi da up", "nhung file nao", "toi da day len", "da day len", "minh da dang", "tai lieu minh", "danh sach tai lieu", "xem tai lieu", "check tai lieu", "kiem tra tai lieu", "liet ke tai lieu")):
+
+    # ── 3. Phiên bản — phải check TRƯỚC own_document_lookup để tránh "file cua toi" nhầm ──
+    elif any(t in folded for t in (
+        "phien ban", "version", "lich su sua", "lich su chinh sua", "ban moi nhat",
+        "ban cu", "lich su phien ban", "cap nhat lan cuoi", "sua lan nao", "sua lan cuoi",
+        "v1", "v2", "lich su thay doi", "rollback", "khoi phuc phien ban",
+    )):
+        label = "version_management"
+
+    # ── 4. Khoảng trống tri thức — phải check TRƯỚC storage_suggestion để tránh nhầm "chu de nao" ──
+    elif any(t in folded for t in (
+        "khoang trong", "thieu tai lieu", "mon thieu", "chua co tai lieu", "con thieu",
+        "can them tai lieu", "chu de nao con it", "chu de nao thieu", "can bo sung",
+        "gap va tri thuc", "rui ro mat du lieu", "tai lieu sap het han",
+        "chu de chua du", "mon hoc chua co tai lieu", "it tai lieu nhat",
+        "nhieu tai lieu nhat", "chu de nao yeu",
+    )):
+        label = "knowledge_gap_analysis"
+
+    # ── 5. Đề xuất nơi lưu — check TRƯỚC is_location_query ──────────────────
+    elif any(t in folded for t in (
+        "nen luu", "luu vao dau", "dat o dau", "nen dat o folder",
+        "nen up vao", "up vao chu de", "nen chon topic",
+        "phu hop voi chu de", "phu hop folder", "noi nao phu hop de luu",
+        "phan loai file", "phan loai tai lieu", "nen phan loai", "nen xep",
+        "xep vao chu de", "gui vao folder", "de xuat luu", "de xuat folder",
+        "file nay thuoc", "thuoc chu de nao", "nen up", "dat vao chuyen nganh",
+        "noi luu", "folder nao phu hop", "chu de nao phu hop",
+    )):
+        label = "storage_suggestion"
+
+    # ── 6. Tài liệu của chính mình ───────────────────────────────────────────
+    elif any(t in folded for t in (
+        "tai lieu cua toi", "file cua toi", "cua minh", "toi da tai", "da upload",
+        "ban than minh", "cua ban than", "toi da up", "nhung file nao", "toi da day len",
+        "da day len", "minh da dang", "tai lieu minh", "danh sach tai lieu cua",
+        "xem tai lieu cua toi", "check tai lieu", "kiem tra tai lieu cua", "liet ke tai lieu",
+        "toi dang co bao nhieu", "toi co bao nhieu tai lieu", "tai lieu nao toi",
+        "xem lai tai lieu", "tai lieu toi da", "file toi da",
+    )):
         label = "own_document_lookup"
-    # Chuyển giao tri thức — check trước upload_help
-    elif any(token in folded for token in ("chuyen giao", "ban giao", "ke thua", "tiep nhan", "handover", "transfer", "nguoi thay the")):
+
+    # ── 7. Đề xuất tài liệu cho task cụ thể ─────────────────────────────────
+    elif any(t in folded for t in (
+        "de xuat tai lieu", "goi y tai lieu", "can tai lieu gi de", "tai lieu nao phu hop",
+        "tai lieu nao giup", "nen doc gi de", "nen xem gi de", "can gi de hoc",
+        "can gi de day", "can gi de lam", "tai lieu nao can doc", "chuan bi gi de",
+        "can chuan bi gi", "tai lieu de on thi", "tai lieu de day mon", "tai lieu cho viec",
+        "tim tai lieu de", "tim tai lieu cho", "tim tai lieu giup", "co tai lieu nao ve",
+        "co file nao ve", "tim file lien quan", "tim tai lieu lien quan",
+        "can tim tai lieu", "tim kiem tai lieu",
+    )):
+        label = "document_recommendation"
+
+    # ── 8. Chuyển giao tri thức ──────────────────────────────────────────────
+    elif any(t in folded for t in (
+        "chuyen giao", "ban giao", "ke thua", "tiep nhan", "handover", "transfer",
+        "nguoi thay the", "ban giao tai lieu", "nghi huu", "thoi viec", "chuyen cong tac",
+        "tiep quan", "tiep nhan tai lieu", "gui tai lieu cho nguoi khac",
+    )):
         label = "knowledge_transfer"
-    # Upload / hướng dẫn tải lên
-    elif any(token in folded for token in ("upload", "tai len", "dang tai", "up file", "lam sao de up", "huong dan tai", "huong dan upload", "cach tai len", "cach tai ", "cach upload", "lam sao tai", "lam sao de tai", "muon tai len", "can tai len", "dua len he thong", "them tai lieu vao")):
+
+    # ── 7. Upload / hướng dẫn tải lên ────────────────────────────────────────
+    elif any(t in folded for t in (
+        "upload", "tai len", "dang tai", "up file", "lam sao de up", "huong dan tai",
+        "huong dan upload", "cach tai len", "cach upload", "lam sao tai", "lam sao de tai",
+        "muon tai len", "can tai len", "dua len he thong", "them tai lieu vao",
+        "dang ky tai lieu", "nop tai lieu", "gui len", "dua file len",
+        "them file vao", "cach them tai lieu", "buoc tai len",
+    )):
         label = "upload_help"
+
+    # ── 9. Vị trí tài liệu ───────────────────────────────────────────────────
     elif is_location_query(question):
         label = "document_location"
-    # Phiên bản — check trước document_lookup vì "ban cu cua file" sẽ nhầm document_lookup
-    elif any(token in folded for token in ("phien ban", "version", "lich su sua", "lich su chinh sua", "cap nhat", "ban moi nhat", "ban cu", "lich su phien ban")):
-        label = "version_management"
-    # Tạo mẫu / template
-    elif any(token in folded for token in ("tao mau", "tao bieu mau", "soan", "template")):
+
+    # ── 10. Tạo mẫu / template ───────────────────────────────────────────────
+    elif any(t in folded for t in (
+        "tao mau", "tao bieu mau", "soan", "template", "mau de cuong", "mau bai giang",
+        "mau tai lieu", "soan thao", "viet tai lieu", "tao tai lieu moi",
+    )):
         label = "create_document"
-    # Trạng thái hệ thống — check trước document_lookup vì "he thong dang xu ly bao nhieu file" sẽ nhầm
-    elif any(token in folded for token in ("he thong co van de", "loi he thong", "kiem tra he thong", "trang thai he thong", "system status", "dang indexing", "xu ly file", "xu ly tai lieu", "he thong dang", "bao nhieu file dang")):
+
+    # ── 11. Trạng thái hệ thống ──────────────────────────────────────────────
+    elif any(t in folded for t in (
+        "he thong co van de", "loi he thong", "kiem tra he thong", "trang thai he thong",
+        "system status", "dang indexing", "xu ly file", "xu ly tai lieu", "he thong dang",
+        "bao nhieu file dang", "he thong chay khong", "ket noi co loi", "server bi loi",
+        "tai sao khong tai duoc", "tai sao loi", "tai sao khong tim thay",
+    )):
         label = "system_status"
-    # Quản lý policy — check trước onboarding vì "them chuyen nganh moi vao" sẽ nhầm onboarding
-    elif any(token in folded for token in ("chinh sach", "cay thu muc", "cau truc khoa", "them chuyen nganh", "them mon hoc", "policy", "them folder", "cau truc thu muc", "cau hinh policy")):
+
+    # ── 12. Quản lý policy ───────────────────────────────────────────────────
+    elif any(t in folded for t in (
+        "chinh sach", "cay thu muc", "cau truc khoa", "them chuyen nganh", "them mon hoc",
+        "policy", "them folder", "cau truc thu muc", "cau hinh policy",
+        "xoa chuyen nganh", "doi ten chuyen nganh", "cau hinh he thong",
+        "quy dinh tai lieu", "tieu chuan tai lieu", "dieu kien upload",
+    )):
         label = "policy_management"
-    # Quản lý người dùng (admin) — check trước onboarding
-    elif any(token in folded for token in ("them giang vien", "xoa tai khoan", "cap quyen", "phan quyen", "quan ly user", "quan ly nguoi dung", "tai khoan", "account")):
+
+    # ── 13. Quản lý người dùng ───────────────────────────────────────────────
+    elif any(t in folded for t in (
+        "them giang vien", "xoa tai khoan", "cap quyen", "phan quyen", "quan ly user",
+        "quan ly nguoi dung", "tai khoan", "account", "khoa tai khoan", "mo khoa",
+        "doi mat khau cho", "dat lai mat khau", "chuyen vai tro", "giang vien nao",
+        "danh sach giang vien", "bao nhieu giang vien co",
+    )):
         label = "user_management"
-    # Hướng dẫn onboarding cho giảng viên mới
-    elif any(token in folded for token in ("moi vao", "moi duoc phan cong", "bat dau tu dau", "lam quen", "gioi thieu he thong", "huong dan su dung", "onboard", "buoc dau", "can lam gi truoc")):
+
+    # ── 14. Yêu cầu quyền truy cập ──────────────────────────────────────────
+    elif any(t in folded for t in (
+        "xin quyen", "yeu cau quyen", "request access", "permission", "quyen truy cap",
+        "cho toi xem", "mo khoa tai lieu", "tai lieu bi khoa", "khong co quyen",
+        "xin phep xem", "can quyen xem",
+    )):
+        label = "permission_request"
+
+    # ── 15. Onboarding ───────────────────────────────────────────────────────
+    elif any(t in folded for t in (
+        "moi vao", "moi duoc phan cong", "bat dau tu dau", "lam quen", "gioi thieu he thong",
+        "huong dan su dung", "onboard", "buoc dau", "can lam gi truoc", "moi bat dau",
+        "chua biet dung", "lan dau su dung", "cach su dung he thong", "gioi thieu tinh nang",
+        "toi moi", "lan dau dang nhap",
+    )):
         label = "onboarding_guide"
-    # Phân tích khoảng trống tri thức
-    elif any(token in folded for token in ("khoang trong", "thieu tai lieu", "mon thieu", "chua co tai lieu", "con thieu", "can them tai lieu")):
-        label = "knowledge_gap_analysis"
-    # Tra cứu tài liệu chung
-    elif any(token in folded for token in ("tim tai lieu", "mo tai lieu", "van ban", "file", "pdf", "docx", "tham khao", "tai lieu tham khao")):
+
+    # ── 16. Tìm kiếm tài liệu chung ─────────────────────────────────────────
+    elif any(t in folded for t in (
+        "tim tai lieu", "mo tai lieu", "van ban", "pdf", "docx", "pptx", "xlsx",
+        "tham khao", "tai lieu tham khao", "bai viet", "nghien cuu",
+        "slide", "de cuong", "bai giang", "giao trinh", "sach giao khoa",
+        "tai ve", "download",
+    )):
         label = "document_lookup"
-    # Chủ đề / tổng hợp / chuẩn bị môn học
-    elif any(token in folded for token in ("chu de", "noi ve", "lien quan", "tong hop", "chuan bi tai lieu", "chuan bi slide", "chuan bi bai giang", "can tai lieu", "can nhung gi", "can gi de day", "tai lieu cho mon", "tai lieu mon", "slide bai giang", "bai giang cho mon")):
+
+    # ── 18. Chủ đề / tổng hợp nội dung ──────────────────────────────────────
+    elif any(t in folded for t in (
+        "chu de", "noi ve", "lien quan den", "tong hop", "chuan bi tai lieu",
+        "chuan bi slide", "chuan bi bai giang", "can nhung gi", "tai lieu cho mon",
+        "tai lieu mon", "slide bai giang", "bai giang cho mon", "on tap",
+        "hoc ve", "tim hieu ve", "kien thuc ve", "noi dung ve", "giang day ve",
+        "on thi", "luyen tap", "tap trung vao",
+    )):
         label = "topic_search"
+
     else:
         label = "question_answer"
+
     return {"label": label, "confidence": 0.9 if label != "question_answer" else 0.75}
 
 
@@ -3897,11 +4026,43 @@ _SUGGESTED_ACTIONS_BY_INTENT: dict[str, dict[str, list[dict]]] = {
             {"label": "Xem kho tài liệu", "route": "/repository"},
         ],
     },
+    "document_lookup": {
+        "default": [
+            {"label": "Tìm kiếm tài liệu", "route": "/search"},
+            {"label": "Xem kho tài liệu", "route": "/repository"},
+        ],
+    },
+    "document_recommendation": {
+        "default": [
+            {"label": "Xem tài liệu được đề xuất", "route": "/repository"},
+            {"label": "Tìm kiếm nâng cao", "route": "/search"},
+        ],
+    },
+    "storage_suggestion": {
+        "default": [
+            {"label": "Tải tài liệu lên", "route": "/repository", "action": "open_upload"},
+        ],
+    },
+    "version_management": {
+        "default": [
+            {"label": "Xem lịch sử phiên bản", "route": "/repository"},
+        ],
+    },
+    "permission_request": {
+        "default": [{"label": "Xem tài liệu công khai", "route": "/repository"}],
+        "admin": [{"label": "Quản lý quyền", "route": "/lecturers"}],
+    },
+    "document_location": {
+        "default": [
+            {"label": "Tìm tài liệu", "route": "/search"},
+            {"label": "Xem kho", "route": "/repository"},
+        ],
+    },
     "question_answer": {
         "default": [{"label": "Tìm kiếm nâng cao", "route": "/search"}],
     },
     "onboarding_guide": {
-        "new_lecturer": [
+        "default": [
             {"label": "Tải lên tài liệu đầu tiên", "route": "/repository", "action": "open_upload"},
             {"label": "Tìm kiếm tài liệu", "route": "/search"},
         ],
@@ -3953,21 +4114,20 @@ def build_role_context(db, user: dict) -> str:
 
 def is_location_query(question: str) -> bool:
     folded = strip_accents(question).casefold()
+    # Exclude storage-suggestion phrasing (user asking WHERE TO PUT a new file)
+    _upload_hints = ("nen luu", "nen up", "nen dat", "nen xep", "nen chon", "de luu",
+                     "muon tai len", "can tai len", "luu file moi", "up vao", "gui vao")
+    if any(h in folded for h in _upload_hints):
+        return False
     location_terms = (
-        "luu o dau",
-        "luu tai dau",
-        "luu trong thu muc nao",
-        "thu muc nao",
-        "nam o dau",
-        "dang o dau",
-        "vi tri",
-        "duong dan",
-        "folder",
-        "path",
+        "luu o dau", "luu tai dau", "luu trong thu muc nao",
+        "thu muc nao", "nam o dau", "dang o dau", "vi tri", "duong dan", "path",
     )
-    storage_terms = ("luu", "thu muc", "folder", "path", "duong dan", "vi tri", "nam")
+    storage_terms = ("luu", "thu muc", "path", "duong dan", "vi tri", "nam")
     return any(term in folded for term in location_terms) or (
-        any(term in folded for term in storage_terms) and any(token in folded for token in ("file", "tai lieu", "no", "nay", "do"))
+        any(term in folded for term in storage_terms)
+        and any(token in folded for token in ("file", "tai lieu", "no", "nay", "do"))
+        and not any(h in folded for h in _upload_hints)
     )
 
 
@@ -4360,16 +4520,44 @@ def _build_oos_response(db, user: dict, retrieval_query: str, reason: str | None
 def _build_conversational_response(db, user: dict, retrieval_query: str, role: str) -> dict:
     """Answer greetings / chitchat without retrieval."""
     import hashlib as _hl
+    folded = strip_accents(retrieval_query).casefold()
     h = int(_hl.md5(retrieval_query.encode()).hexdigest(), 16)
-    greetings = [
-        "Xin chào! Mình là trợ lý AI của EduVault — sẵn sàng giúp bạn tìm tài liệu và hỏi đáp về kho tri thức. Bạn cần gì nhỉ?",
-        "Chào bạn! Bạn muốn tìm tài liệu gì hay hỏi về kho tri thức hôm nay?",
-        "Hi! Mình ở đây để hỗ trợ tìm tài liệu trong EduVault. Bạn cần mình giúp gì?",
-    ]
-    answer = greetings[h % len(greetings)]
+
+    # Chitchat — câu hỏi về bản thân chatbot
+    _is_chitchat = any(t in folded for t in (
+        "ban la ai", "ban ten gi", "ten la gi", "ai tao ra", "ban duoc tao",
+        "ban co the lam gi", "ban gioi", "ban dep trai", "ban thong minh",
+        "hom nay the nao", "ban co khoe",
+    ))
+    name = user.get("name", "bạn")
+    if _is_chitchat:
+        chitchats = [
+            f"Mình là **Trợ lý AI EduVault** — được xây dựng để giúp {name} tìm tài liệu, tra cứu kho tri thức và hỗ trợ các tác vụ trong hệ thống. Bạn hỏi mình điều gì thực sự cần nhỉ? 😊",
+            f"Mình là trợ lý AI của EduVault! Mình có thể giúp bạn:\n• Tìm và đề xuất tài liệu phù hợp\n• Liệt kê tài liệu của bạn\n• Thống kê kho tri thức\n• Hướng dẫn các tính năng hệ thống\nBạn cần gì nào?",
+            "Mình là AI được tích hợp vào EduVault để hỗ trợ quản lý kho tri thức. Cứ hỏi mình về tài liệu, thống kê, hay bất cứ điều gì trong hệ thống nhé!",
+        ]
+        answer = chitchats[h % len(chitchats)]
+        intent_label = "chitchat"
+    else:
+        # Greeting thông thường — gợi ý theo role
+        role_hints = {
+            "admin": "quản lý tài khoản, xem thống kê toàn hệ thống, cấu hình policy",
+            "head": "xem báo cáo khoảng trống tri thức, theo dõi chuyển giao tài liệu",
+            "lecturer": "tìm tài liệu, xem danh sách tài liệu của bạn, hoặc tải lên tài liệu mới",
+            "new_lecturer": "làm quen với hệ thống, tải lên tài liệu đầu tiên, hoặc tìm tài liệu công khai",
+        }
+        hint = role_hints.get(role, "tìm tài liệu và hỏi đáp về kho tri thức")
+        greetings = [
+            f"Xin chào **{name}**! Mình có thể giúp bạn {hint}. Bạn cần gì nhỉ?",
+            f"Chào bạn! Hôm nay bạn muốn {hint}?",
+            f"Hi {name}! Mình là trợ lý EduVault, sẵn sàng giúp bạn {hint}.",
+        ]
+        answer = greetings[h % len(greetings)]
+        intent_label = "greeting"
+
     trace_id = f"trace-{uuid.uuid4().hex[:12]}"
     return {
-        "answer": answer, "citations": [], "intent": "greeting",
+        "answer": answer, "citations": [], "intent": intent_label,
         "trace_id": trace_id, "trace": {}, "verification": {"status": "conversational"},
         "suggested_actions": _suggested_actions_for("document_lookup", role),
         "pipeline": ["conversational"],
@@ -4545,7 +4733,7 @@ def _build_action_response(db, user: dict, retrieval_query: str, intent: str, ro
 
     elif intent == "version_management":
         recent = rows(db.execute(
-            "SELECT d.title, v.version_number, v.created_at FROM versions v "
+            "SELECT d.title, v.version_no, v.created_at FROM versions v "
             "JOIN documents d ON d.id=v.document_id "
             "WHERE d.owner_code=? AND d.deleted_at IS NULL ORDER BY v.created_at DESC LIMIT 10",
             (user["code"],)
@@ -4555,7 +4743,107 @@ def _build_action_response(db, user: dict, retrieval_query: str, intent: str, ro
         else:
             lines = ["**Lịch sử phiên bản tài liệu của bạn:**\n"]
             for v in recent:
-                lines.append(f"• {v.get('title','')} — v{v.get('version_number','')} ({format_date_vietnamese(v.get('created_at',''))})")
+                lines.append(f"• {v.get('title','')} — v{v.get('version_no','')} ({format_date_vietnamese(v.get('created_at',''))})")
+            answer = "\n".join(lines)
+
+    elif intent == "storage_suggestion":
+        # Lấy danh sách topic + doc_type phổ biến để gợi ý
+        topics = rows(db.execute(
+            "SELECT topic, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL AND status='INDEXED' "
+            "GROUP BY topic ORDER BY cnt DESC LIMIT 10"
+        ).fetchall())
+        doc_types = rows(db.execute(
+            "SELECT doc_type, COUNT(*) as cnt FROM documents WHERE deleted_at IS NULL "
+            "GROUP BY doc_type ORDER BY cnt DESC LIMIT 8"
+        ).fetchall())
+
+        # Gợi ý dựa trên nội dung câu hỏi
+        q_lower = strip_accents(retrieval_query).casefold()
+        matched_topic = None
+        for t in topics:
+            topic_name = strip_accents(t.get("topic", "")).casefold()
+            if any(word in q_lower for word in topic_name.split() if len(word) > 3):
+                matched_topic = t.get("topic")
+                break
+
+        lines = ["**Gợi ý nơi lưu tài liệu:**\n"]
+        if matched_topic:
+            lines.append(f"✅ Dựa trên nội dung, tài liệu này phù hợp nhất với chủ đề **{matched_topic}**\n")
+
+        if topics:
+            lines.append("**Các chủ đề hiện có trong kho:**")
+            for t in topics[:6]:
+                cnt = t.get("cnt", 0)
+                lines.append(f"• **{t.get('topic','')}** — {cnt} tài liệu")
+
+        if doc_types:
+            lines.append("\n**Loại tài liệu thường dùng:**")
+            for d in doc_types[:5]:
+                lines.append(f"• {d.get('doc_type','')}")
+
+        lines.append("\n💡 **Cách tải lên:** Kho tri thức → Tải lên → Chọn chủ đề → Điền metadata")
+        answer = "\n".join(lines)
+
+    elif intent == "document_recommendation":
+        # Multi-strategy: keyword match (title/topic) + chunk content search
+        q_lower = strip_accents(retrieval_query).casefold()
+        # Strip common stop-words and intent phrases to get core keywords
+        _stop = {"can", "tai", "lieu", "gi", "de", "tim", "co", "nao", "cho", "mot", "cac",
+                 "ban", "toi", "moi", "nhu", "the", "ve", "va", "la", "se", "hay", "duoc"}
+        keywords = [w for w in q_lower.split() if len(w) > 3 and w not in _stop]
+
+        # 1) Search by title + topic keyword match
+        all_docs = rows(db.execute(
+            "SELECT title, doc_type, topic, visibility, status, owner_code FROM documents "
+            "WHERE deleted_at IS NULL AND status='INDEXED' "
+            "AND (visibility='public' OR owner_code=?) "
+            "ORDER BY created_at DESC LIMIT 100",
+            (user["code"],)
+        ).fetchall())
+
+        scored = []
+        for doc in all_docs:
+            title_folded = strip_accents(doc.get("title", "")).casefold()
+            topic_folded = strip_accents(doc.get("topic", "")).casefold()
+            doc_type_folded = strip_accents(doc.get("doc_type", "")).casefold()
+            score = sum(1 for kw in keywords if kw in title_folded or kw in topic_folded or kw in doc_type_folded)
+            if score > 0:
+                scored.append((score, doc))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = [d for _, d in scored[:5]]
+
+        # 2) Fallback: search chunks content via LIKE (lexical)
+        if not top and keywords:
+            like_conditions = " OR ".join(["content LIKE ?" for _ in keywords[:3]])
+            like_params = [f"%{kw}%" for kw in keywords[:3]] + [user["code"]]
+            chunk_docs = rows(db.execute(
+                f"SELECT DISTINCT d.title, d.doc_type, d.topic, d.visibility, d.owner_code "
+                f"FROM chunks c JOIN documents d ON d.id=c.document_id "
+                f"WHERE ({like_conditions}) AND d.deleted_at IS NULL AND d.status='INDEXED' "
+                f"AND (d.visibility='public' OR d.owner_code=?) LIMIT 5",
+                like_params
+            ).fetchall())
+            top = chunk_docs
+
+        if not top and all_docs:
+            top = all_docs[:5]
+            lines = ["Mình chưa tìm thấy tài liệu khớp chính xác, dưới đây là một số tài liệu mới nhất:\n"]
+        elif not top:
+            answer = ("Kho chưa có tài liệu phù hợp với yêu cầu của bạn. "
+                      "Hãy thử tìm kiếm với từ khóa khác hoặc nhờ admin bổ sung tài liệu.")
+            top = []
+            lines = []
+        else:
+            lines = [f"**Tìm thấy {len(top)} tài liệu phù hợp:**\n"]
+
+        if top:
+            for i, doc in enumerate(top, 1):
+                vis = "🔓 Public" if doc.get("visibility") == "public" else "🔒 Của bạn"
+                lines.append(
+                    f"**{i}. {doc.get('title','')}**\n"
+                    f"   📂 {doc.get('topic','')} · {doc.get('doc_type','')} · {vis}"
+                )
+            lines.append("\n💡 Vào **Kho tri thức** → tìm theo tên để mở tài liệu đầy đủ.")
             answer = "\n".join(lines)
 
     else:

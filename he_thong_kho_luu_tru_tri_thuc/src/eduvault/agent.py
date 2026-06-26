@@ -110,6 +110,7 @@ _SYSTEM_INTENTS = {
 _ACTION_INTENTS = {
     "own_document_lookup", "analytics_query",
     "knowledge_gap_analysis", "version_management",
+    "storage_suggestion", "document_recommendation",
 }
 _CONVERSATIONAL_INTENTS = {"greeting", "chitchat"}
 
