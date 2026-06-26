@@ -9,6 +9,31 @@ import { API_URL } from "@/lib/api";
 type Citation = { id: string; title: string; topic: string; version: number; visibility: string; chunk?: string; score?: number };
 type Verification = { status: string; message: string };
 type Answer = { answer: string; citations: Citation[]; scope: string; trace_id?: string; intent?: string; rewritten_query?: string; verification?: Verification };
+
+const INTENT_META: Record<string, { title: string; emoji: string }> = {
+  topic_search:           { title: "Tài liệu liên quan đến chủ đề",  emoji: "📚" },
+  document_lookup:        { title: "Kết quả tìm kiếm tài liệu",       emoji: "🔍" },
+  document_location:      { title: "Vị trí lưu trữ tài liệu",         emoji: "📂" },
+  own_document_lookup:    { title: "Tài liệu của bạn",                 emoji: "🗂️" },
+  upload_help:            { title: "Hướng dẫn tải lên",                emoji: "⬆️" },
+  version_management:     { title: "Thông tin phiên bản",              emoji: "🔖" },
+  knowledge_transfer:     { title: "Chuyển giao tri thức",             emoji: "🤝" },
+  knowledge_gap_analysis: { title: "Phân tích khoảng trống tri thức",  emoji: "📊" },
+  user_management:        { title: "Quản lý người dùng",               emoji: "👤" },
+  policy_management:      { title: "Cấu hình chính sách",              emoji: "⚙️" },
+  analytics_query:        { title: "Báo cáo & thống kê",               emoji: "📈" },
+  system_status:          { title: "Trạng thái hệ thống",              emoji: "🖥️" },
+  onboarding_guide:       { title: "Hướng dẫn sử dụng",               emoji: "🎓" },
+  question_answer:        { title: "Trả lời từ tài liệu",             emoji: "💬" },
+  out_of_scope:           { title: "Ngoài phạm vi hỗ trợ",            emoji: "⚠️" },
+};
+
+function intentTitle(intent?: string, streaming?: boolean): string {
+  if (streaming) return "";
+  if (!intent) return "Mình đã tìm thấy nội dung phù hợp";
+  const meta = INTENT_META[intent];
+  return meta ? `${meta.emoji} ${meta.title}` : "Mình đã tìm thấy nội dung phù hợp";
+}
 type FeedbackRating = "up" | "wrong_source" | "missing_document";
 type MessageItem = { question: string; result: Answer; status?: string; streaming?: boolean; feedback?: FeedbackRating };
 type Conversation = { id: string; title: string; messages: MessageItem[]; updatedAt: number };
@@ -448,14 +473,22 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
           <div className="max-w-[88%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-4 text-sm">
             <div className="mb-2 flex items-center gap-2 font-bold text-blue-600"><Bot size={16}/>EduVault AI</div>
-            Chào bạn, mình có thể giúp tóm tắt tài liệu, giải thích nội dung hoặc tìm câu trả lời từ kho tri thức bạn được phép xem.
+            <p className="mb-3">Chào bạn! Mình có thể hỗ trợ nhiều việc trong EduVault:</p>
+            <ul className="space-y-1 text-[var(--text)]">
+              <li>📚 <strong>Tìm tài liệu</strong> — theo chủ đề, môn học, loại tài liệu</li>
+              <li>💬 <strong>Hỏi đáp nội dung</strong> — giải thích, tóm tắt tài liệu trong kho</li>
+              <li>⬆️ <strong>Hướng dẫn tải lên</strong> — cách upload, phân loại tài liệu</li>
+              <li>⚙️ <strong>Quản lý policy</strong> — cấu hình cây thư mục, chuyên ngành</li>
+              <li>🤝 <strong>Chuyển giao tri thức</strong> — bàn giao tài liệu giữa giảng viên</li>
+              <li>📊 <strong>Thống kê & khoảng trống</strong> — báo cáo tình trạng kho tri thức</li>
+            </ul>
           </div>
           {messages.map((item, index) => <div key={index} className="space-y-4">
             <div className="ml-auto max-w-[82%] rounded-xl rounded-tr-sm bg-blue-600 p-4 text-sm text-white">{item.question}</div>
             <div className="max-w-[95%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-5 text-sm">
               <div className="mb-4 flex items-center gap-2 font-bold text-blue-600">
                 <Sparkles size={16}/>
-                {item.streaming ? item.status || "Đang trả lời..." : "Mình đã tìm thấy nội dung phù hợp"}
+                {item.streaming ? item.status || "Đang trả lời..." : intentTitle(item.result.intent, item.streaming)}
               </div>
               {item.result.answer ? <div><FriendlyAnswer answer={item.result.answer}/>{item.streaming && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-blue-600 align-middle"/>}</div> : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>}
               {!item.streaming && <Sources citations={item.result.citations} onPreview={openPreview}/>}

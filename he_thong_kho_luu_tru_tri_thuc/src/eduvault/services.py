@@ -3511,6 +3511,36 @@ def _query_intent(question: str) -> dict:
     return {"wants_books": wants_books, "wants_exam": wants_exam, "wants_ai": wants_ai}
 
 
+def _is_out_of_scope_query(question: str) -> str | None:
+    """Trả về lý do nếu câu hỏi nằm ngoài phạm vi chatbot, None nếu hợp lệ."""
+    folded = strip_accents(question).casefold()
+    # Câu hỏi xin ý kiến / quan điểm cá nhân
+    opinion_signals = (
+        "theo ban", "ban nghi", "ban thay", "danh gia xem", "nhan xet xem",
+        "cam nhan cua ban", "y kien cua ban", "ban co nghi", "ban co thay",
+        "chuong nao kho nhat", "kho nhat", "de nhat", "hay nhat theo ban",
+    )
+    if any(s in folded for s in opinion_signals):
+        return "opinion"
+    # Câu hỏi meta về độ chính xác của chatbot
+    meta_signals = (
+        "co chinh xac khong", "chinh xac khong", "dung khong", "co dung khong",
+        "ban co chac khong", "co chac chan khong", "tra loi tren co dung",
+        "cau tra loi tren", "ket qua tren co chinh xac",
+    )
+    if any(s in folded for s in meta_signals):
+        return "meta"
+    # Tin tức / sự kiện ngoài lĩnh vực học thuật
+    off_topic_signals = (
+        "su kien chinh tri", "tin tuc moi nhat", "thoi su", "hom nay co gi moi",
+        "bong da", "the thao", "thoi tiet", "gia vang", "chung khoan",
+        "tin tuc hom nay", "moi nhat hom nay",
+    )
+    if any(s in folded for s in off_topic_signals):
+        return "off_topic"
+    return None
+
+
 def _matches_query_intent(document: dict, content: str, intent: dict) -> bool:
     searchable = f"{document['title']} {document['topic']} {document['doc_type']} {document.get('folder_path') or ''} {content}".lower()
     if intent["wants_books"]:
@@ -3954,13 +3984,14 @@ def format_document_location_answer(document: dict) -> str:
     doc_type = document.get("doc_type") or document.get("document_type") or "Chưa xác định"
     topic = document.get("topic") or "Chưa xác định"
     owner = document.get("owner_code") or "Chưa xác định"
+    title = document.get("title", "tài liệu này")
     return (
-        f"File **{document.get('title', 'tài liệu này')}** đang lưu ở:\n\n"
-        f"`{folder_path}`\n\n"
-        "Thông tin kèm theo:\n"
-        f"- Loại tài liệu: **{doc_type}**\n"
+        f"Mình tìm thấy **{title}** trong kho rồi!\n\n"
+        f"📂 Đường dẫn: `{folder_path}`\n\n"
+        f"- Loại: **{doc_type}**\n"
         f"- Chủ đề: **{topic}**\n"
-        f"- Chủ sở hữu: **{owner}**"
+        f"- Người sở hữu: **{owner}**\n\n"
+        "Bạn có thể vào trang repository để mở trực tiếp nhé."
     )
 
 
@@ -4113,10 +4144,10 @@ def clean_answer_instructions(instructions: str | None, role: str | None = None,
     for phrase in blocked_phrases:
         text = text.replace(phrase, "")
     guardrail = (
-        "Trả lời bằng tiếng Việt, ngắn gọn và đúng trọng tâm. "
-        "Chỉ dùng ngữ cảnh được cung cấp; nếu chưa đủ căn cứ thì nói rõ. "
-        "Không viết mục nguồn trong thân câu trả lời vì giao diện đã hiển thị nguồn riêng. "
-        "Không tự thêm mục gợi ý học tập hoặc câu hỏi tiếp theo."
+        "Trả lời tiếng Việt tự nhiên như đang trò chuyện — không cần trang trọng hay dùng công thức cứng. "
+        "Chỉ dựa trên ngữ cảnh tài liệu được cung cấp; nếu chưa đủ thông tin thì thành thật nói chưa rõ. "
+        "Không viết mục Nguồn trong câu trả lời vì giao diện đã hiển thị riêng. "
+        "Không thêm phần gợi ý học tập, câu hỏi tiếp theo hay bất kỳ nội dung phụ nào ở cuối."
     )
     role_prompt = ROLE_SYSTEM_PROMPTS.get(role or "", "") if role else ""
     parts = [p for p in [role_prompt, role_context, text, guardrail] if p]
@@ -4138,6 +4169,50 @@ def ask(db, user: dict, question: str, filters: dict | None = None, current_page
     role_ctx = build_role_context(db, user)
     if current_page:
         role_ctx += f"\nTrang hiện tại: {current_page}"
+
+    # Early exit for queries outside the system's scope
+    out_of_scope_reason = _is_out_of_scope_query(retrieval_query)
+    if out_of_scope_reason:
+        trace_id = f"trace-{uuid.uuid4().hex[:12]}"
+        intent_label = "out_of_scope"
+        db.execute(
+            "INSERT INTO query_traces(id,user_code,original_query,rewritten_query,intent,retrieved_json,citations_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (trace_id, user["code"], retrieval_query, retrieval_query, intent_label, "[]", "[]", now()),
+        )
+        audit(db, user["code"], "rag.ask", "query", trace_id, {"question": retrieval_query, "matches": 0, "scope": "public_or_owned", "intent": intent_label})
+        if out_of_scope_reason == "opinion":
+            answer = (
+                "Mình chỉ hỗ trợ **tìm kiếm và tra cứu tài liệu** trong kho EduVault.\n\n"
+                "Câu hỏi xin ý kiến hoặc đánh giá cá nhân nằm ngoài khả năng của mình.\n\n"
+                "**Bạn có thể thử:**\n"
+                "• Tìm kiếm tài liệu liên quan đến chủ đề bạn quan tâm\n"
+                "• Hỏi về nội dung cụ thể trong tài liệu có sẵn"
+            )
+        elif out_of_scope_reason == "meta":
+            answer = (
+                "Mình không thể tự đánh giá độ chính xác của câu trả lời vừa đưa ra.\n\n"
+                "**Gợi ý:** Hãy kiểm tra trực tiếp tài liệu gốc được trích dẫn ở phần **Nguồn tham khảo** phía trên."
+            )
+        else:
+            answer = (
+                "Câu hỏi này nằm ngoài phạm vi của mình.\n\n"
+                "Mình chỉ hỗ trợ tìm kiếm **tài liệu học thuật** trong kho EduVault của khoa.\n\n"
+                "**Bạn có thể thử:**\n"
+                "• Tìm tài liệu theo tên môn học\n"
+                "• Tra cứu đề cương, bài giảng, hoặc tài liệu tham khảo"
+            )
+        return {
+            "answer": answer,
+            "citations": [],
+            "scope": "public_or_owned",
+            "intent": intent_label,
+            "rewritten_query": retrieval_query,
+            "trace_id": trace_id,
+            "trace": {"original_query": retrieval_query, "intent": {"label": intent_label}, "retrieved": [], "reranked": []},
+            "verification": {"status": "out_of_scope", "message": "Câu hỏi nằm ngoài phạm vi hệ thống."},
+            "suggested_actions": _suggested_actions_for("document_lookup", role),
+        }
+
     allowed = {document["id"]: document for document in rag_documents(db, user)}
     config = search_policy(db)
     rewritten_query = rewrite_query(retrieval_query)
@@ -4255,7 +4330,11 @@ def ask(db, user: dict, question: str, filters: dict | None = None, current_page
     elif intent["wants_books"] or intent["wants_exam"] or intent["wants_ai"]:
         matches = []
     else:
-        matches = scored[:3]
+        # Only fall back to lexical matches if they have meaningful relevance
+        # (at least one keyword hit in title = score >= 3.0).
+        # Prevents returning unrelated docs when query is off-domain.
+        min_fallback_score = float(config.get("min_fallback_score", 3.0))
+        matches = [item for item in scored if item[0] >= min_fallback_score][:3]
     trace = {
         "original_query": retrieval_query,
         "rewritten_query": rewritten_query,
@@ -4446,7 +4525,8 @@ def format_topic_search_answer(question: str, matches: list[tuple]) -> str | Non
     for _, doc, _ in matches:
         dt = doc.get("doc_type") or "Khác"
         by_type.setdefault(dt, []).append(doc.get("title", ""))
-    lines = ["Tài liệu hiện có trong kho liên quan đến yêu cầu của bạn:\n"]
+    total = sum(len(v) for v in by_type.values())
+    lines = [f"Mình tìm được **{total} tài liệu** phù hợp trong kho:\n"]
     for dt in _TEACHING_ORDER:
         if dt in by_type:
             lines.append(f"**{dt}:**")
@@ -4457,11 +4537,10 @@ def format_topic_search_answer(question: str, matches: list[tuple]) -> str | Non
             lines.append(f"**{dt}:**")
             for title in titles:
                 lines.append(f"- {title}")
-    # Suggest missing types
     present = set(by_type.keys())
     missing = [t for t in ["Đề cương", "Bài giảng", "Đề thi"] if not any(t.lower() in p.lower() for p in present)]
     if missing:
-        lines.append(f"\n⚠️ **Chưa có:** {', '.join(missing)} — bạn có thể upload thêm để đầy đủ hơn.")
+        lines.append(f"\n💡 Kho chưa có **{', '.join(missing)}** — bạn có thể upload thêm để bộ tài liệu đầy đủ hơn nhé.")
     return "\n".join(lines)
 
 
@@ -4473,11 +4552,21 @@ def conversational_fallback(question: str, matches: list[tuple]) -> str:
             for part in re.split(r"\n+|(?<=[.!?])\s+", content)
             if part.strip() and not part.strip().startswith("[")
         ]
-        detail = sentences[0][:240] if sentences else f"Tài liệu tập trung vào {document['topic']}."
+        detail = sentences[0][:200] if sentences else f"Tài liệu về chủ đề {document['topic']}."
         highlights.append((document["title"], detail))
 
+    if not highlights:
+        return "Mình chưa tìm thấy nội dung phù hợp trong kho tài liệu bạn được phép truy cập."
+
+    intros = [
+        "Mình tìm được một số tài liệu có thể giúp ích cho bạn:",
+        "Trong kho có mấy tài liệu liên quan, bạn tham khảo nhé:",
+        "Đây là những tài liệu mình tìm được:",
+    ]
+    import hashlib
+    intro = intros[int(hashlib.md5(question.encode()).hexdigest(), 16) % len(intros)]
     lines = "\n".join(f"- **{title}**: {detail}" for title, detail in highlights)
-    return f"Dưới đây là thông tin tìm được từ các tài liệu liên quan:\n\n{lines}"
+    return f"{intro}\n\n{lines}"
 
 
 def ensure_conversational_format(answer: str, question: str) -> str:

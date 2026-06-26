@@ -208,19 +208,43 @@ Neu policy chi co hoc phan ma khong noi ro nhom chuyen mon, hay gom theo nhom ch
     def answer(self, question: str, contexts: list[dict], fallback: str, instructions: str | None = None) -> str:
         if not self.api_key or not contexts:
             return fallback
+
+        # Extract the actual user question from context-injected string
+        clean_question = question
+        if "Câu hỏi của người dùng:" in question:
+            clean_question = question.split("Câu hỏi của người dùng:")[-1].strip()
+
+        # Extract conversation memory if present
+        memory_section = ""
+        if "Bộ nhớ ngắn hạn:" in question or "Bộ nhớ dài hạn:" in question:
+            memory_lines = []
+            in_memory = False
+            for line in question.split("\n"):
+                if "Bộ nhớ" in line:
+                    in_memory = True
+                elif "Câu hỏi của người dùng:" in line:
+                    in_memory = False
+                elif in_memory and line.strip().startswith("- "):
+                    memory_lines.append(line.strip())
+            if memory_lines:
+                memory_section = "\n\nLịch sử hỏi đáp gần đây (chỉ dùng làm ngữ cảnh):\n" + "\n".join(memory_lines[:5])
+
         context = "\n\n".join(f"[{item['title']}]\n{item['content'][:6000]}" for item in contexts)
-        experience_instructions = """
-Bạn là trợ lý tri thức thân thiện đang trò chuyện trực tiếp với người dùng.
-- Trả lời thẳng vào câu hỏi, không mở đầu bằng "Nguồn tài liệu", "Tóm tắt" hoặc "Kết quả".
-- Dùng câu ngắn, mỗi đoạn tối đa 2-3 dòng; chia thành các khối dễ quét mắt.
-- Dùng markdown và bullet ngắn để trình bày, highlight ý quan trọng bằng **chữ đậm**.
-- Không viết phần nguồn trong câu trả lời; ứng dụng sẽ hiển thị nguồn riêng ở cuối.
-- Không thêm mục gợi ý câu hỏi, gợi ý học tập hay bất kỳ phần phụ nào sau câu trả lời.
-"""
+        experience_instructions = """Bạn là trợ lý AI của EduVault — hệ thống kho tri thức dành cho giảng viên đại học.
+Hãy trả lời như một đồng nghiệp thân thiện, am hiểu hệ thống, không phải như một chatbot đọc database.
+
+Nguyên tắc trả lời:
+- Mở đầu tự nhiên, đi thẳng vào vấn đề — không dùng "Dựa trên tài liệu...", "Theo nguồn..." hay bất kỳ cụm mở đầu cứng nhắc nào.
+- Viết tiếng Việt tự nhiên, như đang nhắn tin cho đồng nghiệp — ngắn gọn, rõ ý, không cần trang trọng quá.
+- Dùng bullet và **in đậm** để highlight ý chính, nhưng đừng liệt kê máy móc nếu câu trả lời ngắn thì viết thường là đủ.
+- Nếu tài liệu trong kho trả lời được → trả lời luôn, không cần báo "đã tìm thấy".
+- Nếu câu hỏi về cách dùng hệ thống → hướng dẫn cụ thể từng bước ngắn gọn.
+- Không viết phần "Nguồn tham khảo" trong thân câu trả lời — giao diện đã hiển thị riêng.
+- Không thêm phần gợi ý câu hỏi hay lời khuyên học tập ở cuối."""
         try:
             return self._response(
-                f"{experience_instructions}\nChỉ dựa trên ngữ cảnh được cung cấp và không tiết lộ dữ liệu ngoài ngữ cảnh.\nHướng dẫn bổ sung của quản trị viên: {instructions or 'Không có.'}",
-                f"Ngữ cảnh:\n{context}\n\nCâu hỏi của người dùng: {question}",
+                f"{experience_instructions}\nChỉ dựa trên ngữ cảnh tài liệu được cung cấp. Không tiết lộ dữ liệu ngoài ngữ cảnh.\nHướng dẫn bổ sung: {instructions or 'Không có.'}",
+                f"Ngữ cảnh tài liệu:\n{context}{memory_section}\n\nCâu hỏi: {clean_question}",
             )
         except RuntimeError:
             return fallback
