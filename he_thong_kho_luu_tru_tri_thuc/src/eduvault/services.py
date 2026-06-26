@@ -4549,7 +4549,7 @@ def _build_rag_response(db, user: dict, question: str, retrieval_query: str,
         question,
         [document_metadata_context(doc, content) for _, doc, content in matches],
         fallback,
-        clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_ctx=role_ctx),
+        clean_answer_instructions(prompts.get("answer_instructions"), role=role, role_context=role_ctx),
     )
 
     ocr_failed_matches = [(s, d, c) for s, d, c in matches if "TEXT_EXTRACTION_INSUFFICIENT" in c or d.get("status") == "TEXT_EXTRACTION_INSUFFICIENT"]
