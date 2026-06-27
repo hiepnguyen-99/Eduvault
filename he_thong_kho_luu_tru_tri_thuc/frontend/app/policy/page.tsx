@@ -194,16 +194,16 @@ type GovernanceAdvisorImpact = {
   source: Record<string, boolean>;
 };
 const assistantExamples = [
-  "Chuyen GV001 sang IoT",
-  "Gan GV002 phu trach Data Science",
-  "Bo GV001 khoi AI",
-  "De thi Toan chi duoc mo cho AI, Data Science, IoT vao 08:00 ngay 10/09/2026",
-  "Hien tai khoa co rui ro gi?",
-  "Nhung viec nao nen lam tiep?",
-  "Chuyen nganh nao dang thieu tri thuc?",
-  "Them AI Agent thuoc AI",
-  "Them hoc phan Data Engineering vao Data Science",
-  "De thi chi truong bo mon duoc xem",
+  "Chuyển GV001 sang IoT",
+  "Gán GV002 phụ trách Data Science",
+  "Bỏ GV001 khỏi AI",
+  "Đề thi Toán chỉ được mở cho AI, Data Science, IoT vào 08:00 ngày 10/09/2026",
+  "Hiện tại khoa có rủi ro gì?",
+  "Những việc nào nên làm tiếp?",
+  "Chuyên ngành nào đang thiếu tri thức?",
+  "Thêm AI Agent thuộc AI",
+  "Thêm học phần Data Engineering vào Data Science",
+  "Đề thi chỉ trưởng bộ môn được xem",
 ];
 
 export default function PolicyPage() {
@@ -597,7 +597,7 @@ function ImportPolicyTab({ policyFiles, reloadAll }: { policyFiles: PolicyFile[]
       setActivatingPolicy(policy);
       setActivationPreview(preview);
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Khong tao duoc activation preview.");
+      setMessage(err instanceof Error ? err.message : "Không tạo được bản xem trước kích hoạt.");
     } finally {
       setBusy(false);
     }
@@ -612,10 +612,10 @@ function ImportPolicyTab({ policyFiles, reloadAll }: { policyFiles: PolicyFile[]
       setActivationSummary(activated.activation_summary || activationPreview);
       setActivationPreview(null);
       setActivatingPolicy(null);
-      setMessage("Policy da duoc kich hoat. Activation impact summary da duoc cap nhat.");
+      setMessage("Chính sách đã được kích hoạt. Tóm tắt tác động kích hoạt đã được cập nhật.");
       await reloadAll();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Khong activate duoc policy.");
+      setMessage(err instanceof Error ? err.message : "Không kích hoạt được chính sách.");
     } finally {
       setBusy(false);
     }
