@@ -31,7 +31,7 @@ export function LoginScreen() {
     setError("");
     try {
       await login(code, password);
-      router.push("/dashboard");
+      router.push("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Đăng nhập thất bại.");
     } finally {
