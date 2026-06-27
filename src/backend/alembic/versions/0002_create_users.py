@@ -16,8 +16,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    user_role = sa.Enum("giang_vien", "truong_bo_mon", "quan_tri", name="user_role")
-    user_role.create(op.get_bind(), checkfirst=True)
+    # SQLAlchemy sẽ tự tạo Enum khi create_table
 
     op.create_table(
         "users",

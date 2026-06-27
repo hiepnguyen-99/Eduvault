@@ -7,7 +7,7 @@ from src.backend.app.core.config import settings
 from src.backend.app.db.base import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -35,7 +35,10 @@ def do_run_migrations(connection):
 async def run_migrations_online() -> None:
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    connectable = create_async_engine(settings.async_database_url)
+    connectable = create_async_engine(
+        settings.async_database_url,
+        connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0}
+    )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()

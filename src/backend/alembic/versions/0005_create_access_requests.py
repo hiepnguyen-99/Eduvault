@@ -17,7 +17,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     access_status = sa.Enum("pending", "approved", "denied", name="access_status")
-    access_status.create(op.get_bind(), checkfirst=True)
+    # access_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "access_requests",

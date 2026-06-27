@@ -18,8 +18,8 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     visibility = sa.Enum("public", "private", name="visibility")
     doc_status = sa.Enum("pending", "processing", "ready", "duplicate", "failed", name="doc_status")
-    visibility.create(op.get_bind(), checkfirst=True)
-    doc_status.create(op.get_bind(), checkfirst=True)
+    # visibility.create(op.get_bind(), checkfirst=True)
+    # doc_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "documents",
