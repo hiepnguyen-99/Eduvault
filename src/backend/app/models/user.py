@@ -12,9 +12,9 @@ from ..db.base import Base
 class UserRole(enum.StrEnum):
     """Ba vai trò trong hệ thống — KHÔNG có đăng ký công khai."""
 
-    giang_vien = "giang_vien"
-    truong_bo_mon = "truong_bo_mon"
-    quan_tri = "quan_tri"
+    lecturer = "lecturer"
+    head = "head"
+    admin = "admin"
 
 
 class User(Base):

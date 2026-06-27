@@ -31,7 +31,7 @@ async def _owned_or_admin(db: AsyncSession, document_id: uuid.UUID, user: User) 
     doc = await db.get(Document, document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
-    if doc.owner_code != user.code and user.role != UserRole.quan_tri:
+    if doc.owner_code != user.code and user.role != UserRole.admin:
         raise HTTPException(status_code=403, detail="Chỉ chủ tài liệu hoặc quản trị")
     return doc
 

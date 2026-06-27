@@ -8,19 +8,20 @@ from src.backend.app.db.session import AsyncSessionLocal
 from src.backend.app.models.user import User, UserRole
 
 SEED_USERS = [
-    ("GV001", "Nguyễn Văn A", "giangvien123", UserRole.giang_vien),
-    ("TBM001", "Trần Thị B", "truongbomon123", UserRole.truong_bo_mon),
-    ("QT001", "Lê Quản Trị", "quantri123", UserRole.quan_tri),
+    ("GV001", "Nguyễn Minh Anh", "GV001", UserRole.lecturer),
+    ("GVNEW", "Lê Thu Hà", "GVNEW", UserRole.lecturer),
+    ("TBM01", "Trần Hoàng Nam", "TBM01", UserRole.head),
+    ("ADMIN", "Phạm Quỳnh Chi", "ADMIN", UserRole.admin),
 ]
 
 
 async def main() -> None:
     async with AsyncSessionLocal() as session:
+        # Xóa tất cả các user cũ để tránh rác và trùng lặp
+        print("[seed] Đang dọn dẹp các user cũ...")
+        await session.execute(text("DELETE FROM users"))
+        
         for code, full_name, password, role in SEED_USERS:
-            existing = await session.execute(select(User).where(User.code == code))
-            if existing.scalar_one_or_none():
-                print(f"[seed] bỏ qua {code} (đã tồn tại)")
-                continue
             session.add(
                 User(
                     code=code,
@@ -35,4 +36,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    # Import text để chạy câu lệnh SQL thuần
+    from sqlalchemy import text
     asyncio.run(main())

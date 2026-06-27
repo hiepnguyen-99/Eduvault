@@ -12,7 +12,7 @@ async def can_access_document(db: AsyncSession, user: User, doc: Document) -> bo
         return True
     if doc.owner_code == user.code:
         return True
-    if user.role == UserRole.quan_tri:
+    if user.role == UserRole.admin:
         return True
     stmt = select(AccessRequest).where(
         AccessRequest.document_id == doc.id,

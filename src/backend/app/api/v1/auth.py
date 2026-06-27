@@ -36,6 +36,6 @@ async def me(user: Annotated[User, Depends(get_current_user)]):
 
 
 @router.get("/admin-only")
-async def admin_only(user: Annotated[User, Depends(require_roles(UserRole.quan_tri))]):
+async def admin_only(user: Annotated[User, Depends(require_roles(UserRole.admin))]):
     """Endpoint demo RBAC — chỉ quản trị mới vào được."""
     return {"ok": True, "code": user.code}

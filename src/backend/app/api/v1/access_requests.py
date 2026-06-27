@@ -60,8 +60,8 @@ async def decide(
     doc = await db.get(Document, req.document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài liệu")
-    if doc.owner_code != user.code and user.role != UserRole.quan_tri:
-        raise HTTPException(status_code=403, detail="Chỉ chủ tài liệu hoặc quản trị mới được duyệt")
+    if doc.owner_code != user.code and user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="Chỉ chủ tài liệu hoặc admin mới được duyệt")
     if payload.status not in (AccessStatus.approved, AccessStatus.denied):
         raise HTTPException(status_code=400, detail="status phải là approved hoặc denied")
     req.status = payload.status

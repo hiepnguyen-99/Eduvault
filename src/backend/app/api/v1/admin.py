@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 @router.put("/permissions", response_model=UserOut)
 async def set_permissions(
     payload: PermissionUpdate,
-    _admin: Annotated[User, Depends(require_roles(UserRole.quan_tri))],
+    _admin: Annotated[User, Depends(require_roles(UserRole.admin))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Chỉ quản trị: đặt vai trò cho 1 tài khoản theo mã giảng viên."""
