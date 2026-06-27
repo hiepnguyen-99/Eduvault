@@ -353,7 +353,7 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
               <strong className="block text-xs leading-none">{user.name}</strong>
               <span className="muted text-[10px] block mt-0.5">{ROLE_LABELS[appRole]}</span>
             </div>
-            <button className="icon-btn ml-1 cursor-pointer" aria-label="Đăng xuất" onClick={async () => { await logout(); window.location.href = "/"; }}>
+            <button className="icon-btn ml-1 cursor-pointer" aria-label="Đăng xuất" onClick={async () => { await logout(); router.push("/"); }}>
               <LogOut size={15}/>
             </button>
           </div>

@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { BookOpenCheck, LoaderCircle, LockKeyhole, Sparkles, Shield, RefreshCw } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 
 const BG_IMAGES = ["/vinuni.jpg", "/vinuni_library.jpg", "/vinuni_hall.jpg"];
 
 export function LoginScreen() {
+  const router = useRouter();
   const { login } = useAuth();
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
@@ -29,7 +31,7 @@ export function LoginScreen() {
     setError("");
     try {
       await login(code, password);
-      window.location.href = "/dashboard";
+      router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Đăng nhập thất bại.");
     } finally {
