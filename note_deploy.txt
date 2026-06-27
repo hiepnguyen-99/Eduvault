@@ -1,0 +1,82 @@
+================================================================================
+          HƯỚNG DẪN DEPLOY FRONTEND LÊN VERCEL & KẾT NỐI BACKEND LOCAL
+================================================================================
+
+Tài liệu này hướng dẫn chi tiết các bước thiết lập, deploy và xử lý các lỗi thường
+gặp (CORS, Mixed Content, IPv6 Resolution) khi đưa giao diện Frontend (Next.js)
+lên đám mây Vercel trong khi vẫn giữ Backend (FastAPI/Uvicorn) chạy ở máy cá nhân (Local).
+
+--------------------------------------------------------------------------------
+1. CẤU HÌNH Ở PHÍA BACKEND (LOCAL)
+--------------------------------------------------------------------------------
+Khi Frontend chạy trên Vercel (sử dụng giao thức HTTPS), trình duyệt sẽ chặn các cuộc
+gọi API nếu Backend không hỗ trợ CORS hoặc bị xung đột giao thức.
+
+* Cấu hình file `src/eduvault/main.py`:
+  Mở rộng CORS để chấp nhận tất cả nguồn gọi API bằng cách đổi `allow_origins`:
+  ```python
+  app.add_middleware(
+      CORSMiddleware,
+      allow_origins=["*"],  # Cho phép tất cả các nguồn (bao gồm Vercel)
+      allow_methods=["*"],
+      allow_headers=["*"],
+  )
+  ```
+  Lưu ý: Sau khi đổi, bạn bắt buộc phải khởi động lại tiến trình Python Backend để
+  áp dụng cài đặt này.
+
+--------------------------------------------------------------------------------
+2. TẠO ĐƯỜNG HẦM HTTPS BẰNG SERVEO (CHO BACKEND)
+--------------------------------------------------------------------------------
+Trình duyệt sẽ chặn nội dung hỗn hợp (Mixed Content) nếu trang HTTPS (Vercel) gọi
+trực tiếp địa chỉ HTTP local (`http://localhost:8081`). Ta cần chuyển đổi địa chỉ
+này thành HTTPS công khai.
+
+* Lệnh thiết lập qua cổng SSH (Chạy trên Terminal local):
+  ```powershell
+  ssh -o StrictHostKeyChecking=no -R 80:127.0.0.1:8081 serveo.net
+  ```
+  Lưu ý quan trọng:
+  - Bắt buộc dùng `127.0.0.1` thay vì `localhost` để tránh lỗi "502 Bad Gateway" do
+    Windows tự động phân giải `localhost` thành địa chỉ IPv6 (`::1`) trong khi
+    Uvicorn chỉ lắng nghe trên IPv4.
+  - Hãy sao chép địa chỉ HTTPS công khai được Serveo cấp (Ví dụ: `https://xxxx.serveousercontent.com`).
+
+--------------------------------------------------------------------------------
+3. DEPLOY FRONTEND LÊN VERCEL
+--------------------------------------------------------------------------------
+* Bước 1: Di chuyển vào thư mục frontend:
+  ```powershell
+  cd frontend
+  ```
+
+* Bước 2: Thiết lập dự án Next.js trên Vercel:
+  ```powershell
+  npx vercel
+  ```
+  (Chọn các thiết lập mặc định và chọn "No" đối với thay đổi Advanced Settings).
+
+* Bước 3: Thêm các biến môi trường cấu hình API:
+  Sử dụng tham số để nhập trực tiếp giá trị và ép buộc ghi đè không tương tác:
+  ```powershell
+  npx vercel env add NEXT_PUBLIC_API_URL production --value "URL_HTTPS_CỦA_SERVEO" --force --no-sensitive --yes
+  ```
+
+* Bước 4: Deploy chính thức lên Production (Bắt buộc không dùng cache):
+  Để đảm bảo Next.js biên dịch lại 100% mã nguồn client-side và nhúng chính xác
+  địa chỉ API mới vào bundle:
+  ```powershell
+  npx vercel --prod --force
+  ```
+
+--------------------------------------------------------------------------------
+4. XỬ LÝ SỰ CỐ & THỬ NGHIỆM
+--------------------------------------------------------------------------------
+* Nếu gặp lỗi "Failed to fetch":
+  1. Mở F12 -> Thẻ Network -> Click đăng nhập -> Kiểm tra Request URL xem có đúng là
+     địa chỉ HTTPS của Serveo hay không.
+  2. Kiểm tra xem Backend local có đang chạy trên cổng `8081` hay không:
+     `curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:8081/api/health` (Kết quả phải là 200).
+  3. Kiểm tra xem đường hầm Serveo có hoạt động tốt không:
+     `curl.exe -s -o NUL -w "%{http_code}" URL_HTTPS_CỦA_SERVEO/api/health` (Kết quả phải là 200).
+  4. Nếu Serveo báo lỗi 502, hãy chắc chắn bạn đã dùng `127.0.0.1` thay vì `localhost` ở lệnh SSH.
