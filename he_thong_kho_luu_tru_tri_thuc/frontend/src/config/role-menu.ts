@@ -1,6 +1,6 @@
 export type AppRole = "ADMIN" | "HEAD_OF_DEPARTMENT" | "LECTURER" | "NEW_LECTURER";
 
-export type BackendRole = "admin" | "head" | "lecturer" | "new_lecturer";
+export type BackendRole = "admin" | "head" | "lecturer" | "new_lecturer" | "giang_vien" | "truong_bo_mon" | "quan_tri";
 
 export type Permission =
   | "dashboard.view"
@@ -59,6 +59,11 @@ export const ROLE_ALIASES: Record<BackendRole, AppRole> = {
   head: "HEAD_OF_DEPARTMENT",
   lecturer: "LECTURER",
   new_lecturer: "NEW_LECTURER",
+  
+  // Ánh xạ các role Tiếng Việt từ Backend mới:
+  quan_tri: "ADMIN",
+  truong_bo_mon: "HEAD_OF_DEPARTMENT",
+  giang_vien: "LECTURER",
 };
 
 export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
