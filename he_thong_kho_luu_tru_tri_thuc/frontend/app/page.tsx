@@ -241,7 +241,7 @@ export default function HomePage() {
           {BG_IMAGES.map((img, idx) => (
             <div 
               key={img} 
-              className={`absolute inset-0 bg-cover bg-center transition-all duration-[1500ms] ease-in-out transform ${idx === currentBgIndex ? "opacity-35 scale-100" : "opacity-0 scale-105"}`} 
+              className={`absolute inset-0 bg-cover bg-center transition-opacity duration-1000 ease-in-out ${idx === currentBgIndex ? "opacity-35" : "opacity-0"}`} 
               style={{ backgroundImage: `url('${img}')` }}
             />
           ))}

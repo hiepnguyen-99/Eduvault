@@ -47,8 +47,8 @@ export function LoginScreen() {
         {BG_IMAGES.map((imgUrl, index) => (
           <div
             key={imgUrl}
-            className={`absolute inset-0 bg-cover bg-center transition-all duration-[1500ms] ease-in-out transform ${
-              index === bgIndex ? "opacity-55 scale-100" : "opacity-0 scale-105"
+            className={`absolute inset-0 bg-cover bg-center transition-opacity duration-1000 ease-in-out ${
+              index === bgIndex ? "opacity-55" : "opacity-0"
             }`}
             style={{ backgroundImage: `url('${imgUrl}')` }}
           />
