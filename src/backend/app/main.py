@@ -28,15 +28,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-@app.get("/")
-async def root():
-    """Trang chủ của API backend."""
-    return {
-        "message": "Welcome to EduVault API",
-        "docs": "/docs",
-        "health": "/health"
-    }
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS.split(","),
