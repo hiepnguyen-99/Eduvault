@@ -1,82 +1,41 @@
-================================================================================
-          HƯỚNG DẪN DEPLOY FRONTEND LÊN VERCEL & KẾT NỐI BACKEND LOCAL
-================================================================================
+  #### Phần 1: Chạy hạ tầng & Backend ở Local
 
-Tài liệu này hướng dẫn chi tiết các bước thiết lập, deploy và xử lý các lỗi thường
-gặp (CORS, Mixed Content, IPv6 Resolution) khi đưa giao diện Frontend (Next.js)
-lên đám mây Vercel trong khi vẫn giữ Backend (FastAPI/Uvicorn) chạy ở máy cá nhân (Local).
+  Mở cửa sổ Terminal 1 (cmd hoặc PowerShell):
 
---------------------------------------------------------------------------------
-1. CẤU HÌNH Ở PHÍA BACKEND (LOCAL)
---------------------------------------------------------------------------------
-Khi Frontend chạy trên Vercel (sử dụng giao thức HTTPS), trình duyệt sẽ chặn các cuộc
-gọi API nếu Backend không hỗ trợ CORS hoặc bị xung đột giao thức.
+    # Di chuyển vào thư mục dự án v2
+    cd D:\User\ProjectGithub\vinaiaction\C2-App-012\he_thong_kho_luu_tru_tri_thuc
+    
+    # 1. Khởi động Docker (MySQL, Redis, MinIO, Qdrant)
+    docker compose -f docker-compose.v2.yml up -d
+    
+    # 2. Chạy Backend local (sẽ chạy trên cổng 8081)
+    ..\venv\Scripts\activate
+    powershell -ExecutionPolicy Bypass -File run_v2_demo.ps1
+    
+  #### Phần 2: Mở đường hầm API (Bắt buộc để Vercel kết nối)
 
-* Cấu hình file `src/eduvault/main.py`:
-  Mở rộng CORS để chấp nhận tất cả nguồn gọi API bằng cách đổi `allow_origins`:
-  ```python
-  app.add_middleware(
-      CORSMiddleware,
-      allow_origins=["*"],  # Cho phép tất cả các nguồn (bao gồm Vercel)
-      allow_methods=["*"],
-      allow_headers=["*"],
-  )
-  ```
-  Lưu ý: Sau khi đổi, bạn bắt buộc phải khởi động lại tiến trình Python Backend để
-  áp dụng cài đặt này.
+  Mở một cửa sổ Terminal 2 mới và giữ nguyên (không tắt):
 
---------------------------------------------------------------------------------
-2. TẠO ĐƯỜNG HẦM HTTPS BẰNG SERVEO (CHO BACKEND)
---------------------------------------------------------------------------------
-Trình duyệt sẽ chặn nội dung hỗn hợp (Mixed Content) nếu trang HTTPS (Vercel) gọi
-trực tiếp địa chỉ HTTP local (`http://localhost:8081`). Ta cần chuyển đổi địa chỉ
-này thành HTTPS công khai.
+    ssh -o StrictHostKeyChecking=no -R eduvault-api-c2-012-v3:80:127.0.0.1:8081 serveo.net
 
-* Lệnh thiết lập qua cổng SSH (Chạy trên Terminal local):
-  ```powershell
-  ssh -o StrictHostKeyChecking=no -R 80:127.0.0.1:8081 serveo.net
-  ```
-  Lưu ý quan trọng:
-  - Bắt buộc dùng `127.0.0.1` thay vì `localhost` để tránh lỗi "502 Bad Gateway" do
-    Windows tự động phân giải `localhost` thành địa chỉ IPv6 (`::1`) trong khi
-    Uvicorn chỉ lắng nghe trên IPv4.
-  - Hãy sao chép địa chỉ HTTPS công khai được Serveo cấp (Ví dụ: `https://xxxx.serveousercontent.com`).
+   -> Link API cố định công khai của bạn sẽ là: `https://eduvault-api-c2-012-v3.serveousercontent.com`
 
---------------------------------------------------------------------------------
-3. DEPLOY FRONTEND LÊN VERCEL
---------------------------------------------------------------------------------
-* Bước 1: Di chuyển vào thư mục frontend:
-  ```powershell
-  cd frontend
-  ```
+3. TRIỂN KHAI FRONTEND LÊN VERCEL
+Chạy các lệnh sau tại thư mục frontend:
+   cd D:\User\ProjectGithub\vinaiaction\C2-App-012\he_thong_kho_luu_tru_tri_thuc\frontend
 
-* Bước 2: Thiết lập dự án Next.js trên Vercel:
-  ```powershell
-  npx vercel
-  ```
-  (Chọn các thiết lập mặc định và chọn "No" đối với thay đổi Advanced Settings).
+   # Bước 1: Tắt các tiến trình Node cũ nếu có để giải phóng cổng/bộ nhớ
+   taskkill /F /IM node.exe
 
-* Bước 3: Thêm các biến môi trường cấu hình API:
-  Sử dụng tham số để nhập trực tiếp giá trị và ép buộc ghi đè không tương tác:
-  ```powershell
-  npx vercel env add NEXT_PUBLIC_API_URL production --value "URL_HTTPS_CỦA_SERVEO" --force --no-sensitive --yes
-  ```
+   # Bước 2: Cài đặt thư viện frontend
+   npm install
 
-* Bước 4: Deploy chính thức lên Production (Bắt buộc không dùng cache):
-  Để đảm bảo Next.js biên dịch lại 100% mã nguồn client-side và nhúng chính xác
-  địa chỉ API mới vào bundle:
-  ```powershell
-  npx vercel --prod --force
-  ```
+   # Bước 3: Đăng nhập & Liên kết dự án với Vercel (nếu chưa làm)
+   npx vercel login
+   npx vercel link
 
---------------------------------------------------------------------------------
-4. XỬ LÝ SỰ CỐ & THỬ NGHIỆM
---------------------------------------------------------------------------------
-* Nếu gặp lỗi "Failed to fetch":
-  1. Mở F12 -> Thẻ Network -> Click đăng nhập -> Kiểm tra Request URL xem có đúng là
-     địa chỉ HTTPS của Serveo hay không.
-  2. Kiểm tra xem Backend local có đang chạy trên cổng `8081` hay không:
-     `curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:8081/api/health` (Kết quả phải là 200).
-  3. Kiểm tra xem đường hầm Serveo có hoạt động tốt không:
-     `curl.exe -s -o NUL -w "%{http_code}" URL_HTTPS_CỦA_SERVEO/api/health` (Kết quả phải là 200).
-  4. Nếu Serveo báo lỗi 502, hãy chắc chắn bạn đã dùng `127.0.0.1` thay vì `localhost` ở lệnh SSH.
+   # Bước 4: Thiết lập biến môi trường API URL trên Vercel trỏ tới Serveo Tunnel
+   npx vercel env add NEXT_PUBLIC_API_URL production --value https://eduvault-api-c2-012-v3.serveousercontent.com --yes --force
+
+    # 4. Build và deploy thực tế lên Vercel Production
+    npx vercel --prod --force

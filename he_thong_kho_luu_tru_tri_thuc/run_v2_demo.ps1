@@ -8,7 +8,11 @@ if (-not (Test-Path ".env")) {
 }
 
 Write-Host "Starting EduVault V2 backend..."
-Start-Process python -ArgumentList "run_mvp.py" -WorkingDirectory $root -WindowStyle Hidden `
+$pythonExe = "python"
+if (Test-Path "..\venv\Scripts\python.exe") {
+    $pythonExe = "..\venv\Scripts\python.exe"
+}
+Start-Process $pythonExe -ArgumentList "run_mvp.py" -WorkingDirectory $root -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $root "v2-backend.stdout.log") `
     -RedirectStandardError (Join-Path $root "v2-backend.stderr.log")
 
