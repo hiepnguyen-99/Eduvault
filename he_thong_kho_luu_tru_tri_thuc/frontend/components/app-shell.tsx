@@ -147,8 +147,36 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
 
   if (!ready) return <div className="grid min-h-screen place-items-center text-sm muted">Đang kết nối tới máy chủ...</div>;
 
+  const isPublic = path === "/";
   if (!user) {
-    return <LoginScreen />;
+    if (!isPublic) {
+      return <LoginScreen />;
+    }
+    return (
+      <div className="min-h-screen flex flex-col bg-[var(--bg)]">
+        <header className="sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-[var(--border)] bg-[color:var(--card)]/92 px-4 backdrop-blur md:px-7 shadow-sm">
+          <div className="flex items-center gap-6">
+            <Link href="/" className="flex items-center gap-2.5 shrink-0 group">
+              <img src="/vinuni_logo.png" alt="VinUniversity Logo" className="h-10 w-auto object-contain transition-transform duration-300 group-hover:scale-105" />
+              <div className="hidden lg:block min-w-0">
+                <strong className="block text-xs font-black text-[#102451] uppercase tracking-wider leading-none">Kho lưu trữ tri thức khoa CNTT</strong>
+              </div>
+            </Link>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button className="icon-btn cursor-pointer" aria-label="Đổi giao diện" onClick={() => setDark(!dark)}>{dark ? <Sun size={17}/> : <Moon size={17}/>}</button>
+            <Link href="/dashboard" className="btn-primary h-9 rounded-lg px-4 text-xs font-bold flex items-center justify-center bg-[#102451] hover:bg-[#C92027] text-white transition-all duration-200">
+              Đăng nhập
+            </Link>
+          </div>
+        </header>
+
+        <main className="flex-1 mx-auto w-full max-w-[1680px] p-4 md:p-7">
+          {children}
+        </main>
+      </div>
+    );
   }
 
   const effectivePermissions = Array.from(new Set([...(user.permissions || []), ...permissionsForRole(user.role)]));
