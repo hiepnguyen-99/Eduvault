@@ -808,9 +808,12 @@ def init_database() -> None:
             if "applied_at" not in access_columns:
                 db.execute("ALTER TABLE access_requests ADD COLUMN applied_at VARCHAR(40) NULL")
         for code, name, role, department in SEED_USERS:
-            db.execute("DELETE FROM users WHERE code=?", (code,))
             db.execute(
-                "INSERT INTO users VALUES (?, ?, ?, ?, ?, 1)",
+                "UPDATE users SET name=?, role=?, department=?, password_hash=?, active=1 WHERE code=?",
+                (name, role, department, hash_secret(seed_password_for(code)), code)
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, 1)",
                 (code, name, role, department, hash_secret(seed_password_for(code))),
             )
         db.execute(
