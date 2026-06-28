@@ -61,8 +61,7 @@ def required_secret(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         if name.startswith("EDUVAULT_SEED_PASSWORD_"):
-            code = name.replace("EDUVAULT_SEED_PASSWORD_", "").lower()
-            return f"{code}123"
+            return name.replace("EDUVAULT_SEED_PASSWORD_", "")
         return "default-fallback-secret-2026"
     return value
 
