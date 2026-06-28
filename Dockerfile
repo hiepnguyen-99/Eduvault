@@ -13,6 +13,7 @@ WORKDIR /app
 
 COPY --from=builder /root/.local /root/.local
 ENV PATH=/root/.local/bin:$PATH
+ENV PYTHONPATH=/app/he_thong_kho_luu_tru_tri_thuc/src
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
@@ -20,4 +21,4 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "src.backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "eduvault.main:app", "--host", "0.0.0.0", "--port", "8000"]
