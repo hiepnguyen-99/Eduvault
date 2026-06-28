@@ -280,13 +280,18 @@ export function AssistantChat({ variant = "page", context, onClose, className = 
     setMemory({ shortTerm: [], longTerm: [], updatedAt: Date.now() });
     setServerMemory(null);
     setMemoryOpen(false);
-    fetch("/api/assistant/memory", { method: "DELETE" }).catch(() => {});
+    fetch(`${API_URL}/api/assistant/memory`, {
+      method: "DELETE",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }).catch(() => {});
   }
 
   function openMemoryPanel() {
     setMemoryOpen(v => !v);
     if (!memoryOpen) {
-      fetch("/api/assistant/memory")
+      fetch(`${API_URL}/api/assistant/memory`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (data) setServerMemory(data); })
         .catch(() => {});
