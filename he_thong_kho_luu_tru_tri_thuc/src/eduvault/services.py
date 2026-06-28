@@ -2961,7 +2961,33 @@ def content_for(db, document: dict) -> str:
         "SELECT storage_path FROM versions WHERE document_id=? AND version_no=?",
         (document["id"], document["current_version"]),
     ).fetchone()
-    return Path(row["storage_path"]).read_text(encoding="utf-8") if row else ""
+    if not row:
+        return ""
+    path = Path(row["storage_path"])
+    if path.exists() and path.is_file():
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+            
+    # Self-healing fallback: Reconstruct from chunks in the database
+    try:
+        chunks = db.execute(
+            "SELECT content FROM chunks WHERE document_id=? AND version_no=?",
+            (document["id"], document["current_version"])
+        ).fetchall()
+        if chunks:
+            full_text = "\n\n".join(c["content"] for c in chunks)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(full_text, encoding="utf-8")
+            except Exception:
+                pass
+            return full_text
+    except Exception as exc:
+        print(f"[content_for] Failed to reconstruct document from chunks: {exc}")
+        
+    return ""
 
 
 def meaningful_text_score(text: str) -> int:
