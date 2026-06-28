@@ -366,6 +366,7 @@ def maybe_call_n8n_policy_webhook(payload: dict) -> dict:
         return {"status": "failed", "message": str(exc)}
 
 
+@app.get("/health")
 @app.get("/api/health")
 def health():
     return {
