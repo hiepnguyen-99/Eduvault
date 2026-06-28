@@ -27,43 +27,90 @@ load_env_file()
 
 
 class AIProvider:
-    """OpenAI-ready AI layer with a deterministic local fallback."""
+    """AI layer supporting both Gemini (native) and OpenAI/proxy with a deterministic local fallback."""
 
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
-        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        self.gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        
+        if self.gemini_key:
+            self.api_key = self.gemini_key
+            self.provider = "gemini"
+            self.model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+        elif self.openai_key:
+            self.api_key = self.openai_key
+            self.provider = "openai"
+            self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+            self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        else:
+            self.api_key = ""
+            self.provider = "local"
+            self.model = "local-fallback"
 
     @property
     def mode(self) -> str:
-        return "openai" if self.api_key else "local"
+        return self.provider
 
     def status(self) -> dict:
-        return {
-            "provider": self.mode, "model": self.model if self.api_key else "local-fallback",
-            "embedding_model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small") if self.api_key else "local-hash-vector",
-            "configured": bool(self.api_key),
-        }
+        if self.provider == "gemini":
+            return {
+                "provider": "gemini", "model": self.model,
+                "embedding_model": "text-embedding-004",
+                "configured": True,
+            }
+        elif self.provider == "openai":
+            return {
+                "provider": "openai", "model": self.model,
+                "embedding_model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+                "configured": True,
+            }
+        else:
+            return {
+                "provider": "local", "model": "local-fallback",
+                "embedding_model": "local-hash-vector",
+                "configured": False,
+            }
 
-    def _response(self, instructions: str, prompt: str) -> str:
-        body = json.dumps({"model": self.model, "instructions": instructions, "input": prompt}, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.base_url}/responses", data=body, method="POST",
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"OpenAI API không khả dụng: {exc}") from exc
-        if data.get("output_text"):
-            return data["output_text"]
-        return "\n".join(
-            content.get("text", "")
-            for item in data.get("output", [])
-            for content in item.get("content", [])
-            if content.get("type") == "output_text"
-        )
+    def _response(self, instructions: str, prompt: str, json_mode: bool = False) -> str:
+        if self.provider == "gemini":
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "systemInstruction": {"parts": [{"text": instructions}]}
+            }
+            if json_mode:
+                payload["generationConfig"] = {"responseMimeType": "application/json"}
+            
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+                raise RuntimeError(f"Gemini API không khả dụng: {exc}") from exc
+                
+        elif self.provider == "openai":
+            body = json.dumps({"model": self.model, "instructions": instructions, "input": prompt}, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(
+                f"{self.base_url}/responses", data=body, method="POST",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"OpenAI API không khả dụng: {exc}") from exc
+            if data.get("output_text"):
+                return data["output_text"]
+            return "\n".join(
+                content.get("text", "")
+                for item in data.get("output", [])
+                for content in item.get("content", [])
+                if content.get("type") == "output_text"
+            )
+        else:
+            raise RuntimeError("Không có AI Provider nào được cấu hình.")
 
     def _ocr_images_batched(self, images: list[bytes], model: str) -> str:
         max_pages = max(1, int(os.getenv("OCR_MAX_PAGES", "30")))
@@ -121,34 +168,35 @@ class AIProvider:
     def ocr_images(self, images: list[bytes]) -> str:
         if not self.api_key or not images:
             return ""
-        model = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini").strip() or self.model
-        return self._ocr_images_batched(images, model)
-        content = [{"type": "input_text", "text": "Trích xuất nguyên văn toàn bộ chữ trong các trang tài liệu này. Giữ thứ tự đọc và xuống dòng hợp lý. Chỉ trả nội dung tài liệu."}]
-        content.extend(
-            {"type": "input_image", "image_url": f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}"}
-            for image in images[:10]
-        )
-        body = json.dumps(
-            {"model": model, "instructions": "Bạn là hệ thống OCR tài liệu tiếng Việt chính xác.", "input": [{"role": "user", "content": content}]},
-            ensure_ascii=False,
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.base_url}/responses", data=body, method="POST",
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            if data.get("output_text"):
-                return data["output_text"]
-            return "\n".join(
-                item.get("text", "")
-                for output in data.get("output", [])
-                for item in output.get("content", [])
-                if item.get("type") == "output_text"
-            )
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-            return ""
+            
+        if self.provider == "gemini":
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+            parts = []
+            parts.append({
+                "text": "Trích xuất nguyên văn toàn bộ chữ trong các trang tài liệu này. Giữ thứ tự đọc và xuống dòng hợp lý. Chỉ trả nội dung tài liệu."
+            })
+            for img in images[:10]:
+                parts.append({
+                    "inlineData": {
+                        "mimeType": "image/png",
+                        "data": base64.b64encode(img).decode("ascii")
+                    }
+                })
+            payload = {"contents": [{"parts": parts}]}
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception as exc:
+                print(f"[ocr_images] Gemini OCR error: {exc}")
+                return ""
+                
+        elif self.provider == "openai":
+            model = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini").strip() or self.model
+            return self._ocr_images_batched(images, model)
+        return ""
 
     def metadata(self, filename: str, content: str, fallback: dict, instructions: str | None = None) -> dict:
         if not self.api_key:
@@ -157,6 +205,7 @@ class AIProvider:
             raw = self._response(
                 instructions or "Phân loại tài liệu học thuật tiếng Việt. Chỉ trả JSON hợp lệ, không markdown.",
                 f"Tên file: {filename}\nNội dung:\n{content[:12000]}\nTrả JSON gồm title, topic, doc_type, summary, keywords.",
+                json_mode=True
             )
             result = json.loads(re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip())
             return {**fallback, **{key: result[key] for key in ("title", "topic", "doc_type", "summary", "keywords") if key in result}}
@@ -199,7 +248,7 @@ Khong tao node rong. Khong dat ten node la "Thu muc". Khong tra id ky thuat.
 Neu policy chi co hoc phan ma khong noi ro nhom chuyen mon, hay gom theo nhom chuyen mon gan nhat trong van ban.
 """
         try:
-            raw = self._response(instructions, f"Noi dung policy:\n{content[:20000]}")
+            raw = self._response(instructions, f"Noi dung policy:\n{content[:20000]}", json_mode=True)
             cleaned = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
             return {**fallback, **json.loads(cleaned)}
         except (RuntimeError, json.JSONDecodeError):
@@ -209,12 +258,10 @@ Neu policy chi co hoc phan ma khong noi ro nhom chuyen mon, hay gom theo nhom ch
         if not self.api_key or not contexts:
             return fallback
 
-        # Extract the actual user question from context-injected string
         clean_question = question
         if "Câu hỏi của người dùng:" in question:
             clean_question = question.split("Câu hỏi của người dùng:")[-1].strip()
 
-        # Extract conversation memory if present
         memory_section = ""
         if "Bộ nhớ ngắn hạn:" in question or "Bộ nhớ dài hạn:" in question:
             memory_lines = []
@@ -251,17 +298,34 @@ Nguyên tắc trả lời:
 
     def embed(self, text: str, force_local: bool = False) -> list[float]:
         if self.api_key and not force_local:
-            model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-            body = json.dumps({"model": model, "input": text[:24000]}, ensure_ascii=False).encode("utf-8")
-            request = urllib.request.Request(
-                f"{self.base_url}/embeddings", data=body, method="POST",
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=45) as response:
-                    return json.loads(response.read().decode("utf-8"))["data"][0]["embedding"]
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError):
-                pass
+            if self.provider == "gemini":
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={self.api_key}"
+                payload = {
+                    "model": "models/text-embedding-004",
+                    "content": {"parts": [{"text": text[:10000]}]}
+                }
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+                        return data["embedding"]["values"]
+                except Exception as exc:
+                    print(f"[embed] Gemini embedding error: {exc}")
+                    pass
+            elif self.provider == "openai":
+                model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+                body = json.dumps({"model": model, "input": text[:24000]}, ensure_ascii=False).encode("utf-8")
+                request = urllib.request.Request(
+                    f"{self.base_url}/embeddings", data=body, method="POST",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        return json.loads(response.read().decode("utf-8"))["data"][0]["embedding"]
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError):
+                    pass
+                    
         vector = [0.0] * 128
         for word in re.findall(r"\w+", text.lower(), re.UNICODE):
             index = int.from_bytes(hashlib.sha256(word.encode("utf-8")).digest()[:4], "big") % len(vector)
