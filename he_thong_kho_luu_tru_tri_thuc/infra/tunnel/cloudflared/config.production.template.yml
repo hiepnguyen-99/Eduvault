@@ -1,0 +1,11 @@
+tunnel: __CLOUDFLARE_TUNNEL_ID__
+credentials-file: __CLOUDFLARE_CREDENTIALS_FILE__
+
+ingress:
+  - hostname: __CLOUDFLARE_FRONTEND_HOSTNAME__
+    service: http://127.0.0.1:3000
+
+  - hostname: __CLOUDFLARE_BACKEND_HOSTNAME__
+    service: http://127.0.0.1:8080
+
+  - service: http_status:404

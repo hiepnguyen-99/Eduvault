@@ -114,7 +114,7 @@ export default function OperationsPage() {
       {(error || message) && <p className="mb-4 rounded bg-amber-50 p-3 text-xs text-amber-800">{message || error}</p>}
 
       {data.alerts.critical.length > 0 && (
-        <Panel title="Canh bao nghiem trong" description="Can xu ly ngay de tranh anh huong he thong." className="mb-5">
+        <Panel title="Cảnh báo nghiêm trọng" description="Cần xử lý ngay để tránh ảnh hưởng hệ thống." className="mb-5">
           <div className="grid gap-3 p-4 lg:grid-cols-2">
             {data.alerts.critical.map(item => <AlertCard key={item.code} item={item} />)}
           </div>
@@ -122,7 +122,7 @@ export default function OperationsPage() {
       )}
 
       {visibleWarnings.length > 0 && (
-        <Panel title="Canh bao can theo doi" description="Nhung diem can xu ly som de tranh anh huong van hanh." className="mb-5">
+        <Panel title="Cảnh báo cần theo dõi" description="Những điểm cần xử lý sớm để tránh ảnh hưởng vận hành." className="mb-5">
           <div className="grid gap-3 p-4 lg:grid-cols-2">
             {visibleWarnings.map(item => <AlertCard key={item.code} item={item} />)}
           </div>
@@ -228,11 +228,36 @@ function StatusMetric({ label, value, detail, icon, tone }: { label: string; val
 
 function AlertCard({ item }: { item: AlertItem }) {
   const tone = item.severity === "critical" ? "red" : "yellow";
+  const title = item.title
+    .replace("Chua co backup gan day", "Chưa có backup gần đây")
+    .replace("Backup da qua 24 gio", "Backup đã quá 24 giờ")
+    .replace("Chua kiem tra restore gan day", "Chưa kiểm tra restore gần đây")
+    .replace("Restore verify da qua 7 ngay", "Restore verify đã quá 7 ngày")
+    .replace("Tan suat fallback Qdrant cao", "Tần suất fallback Qdrant cao")
+    .replace("API khong san sang", "API không sẵn sàng")
+    .replace("Co so du lieu khong kha dung", "Cơ sở dữ liệu không khả dụng")
+    .replace("Kho doi tuong khong kha dung", "Kho đối tượng không khả dụng")
+    .replace("Qdrant khong kha dung", "Qdrant không khả dụng")
+    .replace("offline", "offline");
+    
+  const detail = item.detail
+    .replace("He thong chua co ban sao luu thanh cong de doi chieu.", "Hệ thống chưa có bản sao lưu thành công để đối chiếu.")
+    .replace("He thong chua co ban ghi xac minh khoi phuc nao.", "Hệ thống chưa có bản ghi xác minh khôi phục nào.")
+    .replace("Ban sao luu gan nhat da", "Bản sao lưu gần nhất đã")
+    .replace("Lan xac minh khoi phuc gan nhat da", "Lần xác minh khôi phục gần nhất đã")
+    .replace("API health khong tra ve trang thai ok.", "API health không trả về trạng thái ok.")
+    .replace("Backend khong ket noi duoc co so du lieu hien tai.", "Backend không kết nối được cơ sở dữ liệu hiện tại.")
+    .replace("Object storage dang loi hoac chua san sang.", "Object storage đang lỗi hoặc chưa sẵn sàng.")
+    .replace("Vector store dang loi hoac chua san sang.", "Vector store đang lỗi hoặc chưa sẵn sàng.")
+    .replace("Workflow chua co heartbeat.", "Workflow chưa có heartbeat.")
+    .replace("Workflow da offline", "Workflow đã offline")
+    .replace("fallback trong gio qua, nguong la", "fallback trong giờ qua, ngưỡng là");
+
   return (
     <div className={`rounded-lg border p-4 ${tone === "red" ? "border-red-200 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
-      <div className="flex items-center gap-2 text-sm font-bold"><AlertTriangle size={16}/>{item.title}</div>
-      <p className="mt-2 text-xs leading-5">{item.detail}</p>
-      <p className="mt-2 text-[11px] opacity-80">Nguon: {item.source}</p>
+      <div className="flex items-center gap-2 text-sm font-bold"><AlertTriangle size={16}/>{title}</div>
+      <p className="mt-2 text-xs leading-5">{detail}</p>
+      <p className="mt-2 text-[11px] opacity-80">Nguồn: {item.source}</p>
     </div>
   );
 }

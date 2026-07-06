@@ -1,0 +1,8 @@
+{
+  "build": {
+    "env": {
+      "BACKEND_URL": "https://c2-app-012-api.eduvinuni.io.vn",
+      "NEXT_PUBLIC_API_URL": "https://c2-app-012-api.eduvinuni.io.vn"
+    }
+  }
+}

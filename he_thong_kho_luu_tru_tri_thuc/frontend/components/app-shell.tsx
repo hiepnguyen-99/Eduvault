@@ -8,8 +8,10 @@ import {
   Bot,
   ChevronDown,
   CheckCircle2,
+  FolderSync,
   LoaderCircle,
   LogOut,
+  HelpCircle,
   Menu,
   Moon,
   RefreshCw,
@@ -17,13 +19,14 @@ import {
   Sun,
   Trash2,
   UploadCloud,
+  User,
   X,
   XCircle,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { AssistantChat } from "@/components/assistant-chat";
 import { LoginScreen } from "@/components/login-screen";
-import { UploadTask, UploadTaskProvider, useUploadTasks } from "@/components/upload-task-provider";
+import { UploadTask, UploadTaskProvider, useUploadTasks, labelForUploadSource } from "@/components/upload-task-provider";
 import { canAccessPath, permissionsForRole, ROLE_LABELS, ROLE_MENUS, toAppRole, MenuItem } from "@/src/config/role-menu";
 
 const GLOBAL_ASSISTANT_OPEN_KEY = "eduvault.global-assistant.open";
@@ -98,6 +101,10 @@ function UploadNotificationMenu() {
               </div>
               <div className="progress mt-3"><i style={{ width: `${active ? progress : 100}%` }} className={task.status === "failed" ? "!bg-red-500" : task.status === "completed" ? "!bg-green-500" : ""}/></div>
               <div className="muted mt-1 flex justify-between text-[10px]"><span>{formatUploadBytes(task.uploaded_bytes)} / {formatUploadBytes(task.total_bytes)}</span><span>{progress}%</span></div>
+              <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
+                <span className="badge badge-blue">{labelForUploadSource(task.metadata.source_type)}</span>
+                {task.metadata.device_id && <span className="badge badge-amber">{task.metadata.device_id}</span>}
+              </div>
               {task.metadata.ai_metadata && <div className="mt-2 rounded-lg bg-[var(--soft)] p-2 text-[10px]">
                 <strong className="block text-blue-700">Nhãn AI đã gán</strong>
                 <span className="muted">{task.metadata.ai_metadata.topic} · {task.metadata.ai_metadata.doc_type}</span>
@@ -115,11 +122,13 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const router = useRouter();
   const { user, ready, logout } = useAuth();
+  const { tasks } = useUploadTasks();
   const [dark, setDark] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [headerQuery, setHeaderQuery] = useState("");
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantReady, setAssistantReady] = useState(false);
+  const [mascotVisible, setMascotVisible] = useState(true);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -140,17 +149,26 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   }, [assistantOpen, assistantReady]);
 
   useEffect(() => {
+    function handleDoubleClick(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (target.closest('button') || target.closest('a') || target.closest('input') || target.closest('textarea')) return;
+      
+      setMascotVisible(v => !v);
+      window.getSelection()?.removeAllRanges();
+    }
+    
+    window.addEventListener('dblclick', handleDoubleClick);
+    return () => window.removeEventListener('dblclick', handleDoubleClick);
+  }, []);
+
+  useEffect(() => {
     if (!ready || !user) return;
     const permissions = Array.from(new Set([...(user.permissions || []), ...permissionsForRole(user.role)]));
     if (!canAccessPath(path, permissions)) router.replace("/");
   }, [path, ready, router, user]);
 
   if (!ready) return <div className="grid min-h-screen place-items-center text-sm muted">Đang kết nối tới máy chủ...</div>;
-
-  if (!user) {
-    return <LoginScreen />;
-  }
-
+  if (!user) return <LoginScreen />;
   const effectivePermissions = Array.from(new Set([...(user.permissions || []), ...permissionsForRole(user.role)]));
   if (!canAccessPath(path, effectivePermissions)) return null;
 
@@ -172,16 +190,17 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   // Group menu items for Horizontal Nav
   const groups: { label: string; items: MenuItem[] }[] = [];
   const overviewItems = menuItems.filter(item => ["/dashboard", "/search"].includes(item.href.split("?")[0]));
-  const repositoryItems = menuItems.filter(item => ["/repository", "/trash", "/versions", "/knowledge-transfer"].includes(item.href.split("?")[0]));
+  const repositoryItems = menuItems.filter(item => ["/repository", "/auto-ingestion", "/trash", "/versions", "/knowledge-transfer"].includes(item.href.split("?")[0]));
   const adminItems = menuItems.filter(item => ["/operations", "/policy", "/governance-rules", "/users", "/permissions", "/backup", "/reports", "/audit-logs"].includes(item.href.split("?")[0]));
   const aiItems = menuItems.filter(item => ["/assistant"].includes(item.href.split("?")[0]));
   const profileItems = menuItems.filter(item => ["/profile"].includes(item.href.split("?")[0]));
+  const desktopPendingCount = tasks.filter(task => task.metadata.source_type === "desktop_agent" && task.status === "pending_confirmation").length;
+  const desktopActiveCount = tasks.filter(task => task.metadata.source_type === "desktop_agent" && !["completed", "failed"].includes(task.status)).length;
 
   if (overviewItems.length > 0) groups.push({ label: "Tổng quan", items: overviewItems });
   if (repositoryItems.length > 0) groups.push({ label: "Kho tài liệu", items: repositoryItems });
   if (adminItems.length > 0) groups.push({ label: "Quản trị", items: adminItems });
   if (aiItems.length > 0) groups.push({ label: "Trợ lý AI", items: aiItems });
-  if (profileItems.length > 0) groups.push({ label: "Cá nhân", items: profileItems });
 
   function submitHeaderSearch(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -239,17 +258,20 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-[var(--bg)]">
-      <header className="sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-[var(--border)] bg-[color:var(--card)]/92 px-4 backdrop-blur md:px-7 shadow-sm">
-        <div className="flex items-center gap-6">
-          <Link href="/" className="flex items-center gap-2.5 shrink-0 group">
-            <img src="/vinuni_logo.png" alt="VinUniversity Logo" className="h-10 w-auto object-contain transition-transform duration-300 group-hover:scale-105" />
+    <div className="edu-tech-bg min-h-screen flex flex-col relative overflow-hidden">
+      <div className="float-node node-1 w-[500px] h-[500px] top-[-5%] left-[-10%]" style={{ animationDelay: '0s' }}></div>
+      <div className="float-node node-2 w-[700px] h-[700px] top-[20%] right-[-15%]" style={{ animationDelay: '5s' }}></div>
+      <div className="float-node node-3 w-[450px] h-[450px] bottom-[-10%] left-[25%]" style={{ animationDelay: '2s' }}></div>
+      <header className="top-nav-shell sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900/85 px-4 md:px-7 shadow-sm">
+        <div className="flex items-center gap-2 xl:gap-6 min-w-0 flex-1">
+          <Link href="/" className="flex items-center gap-2.5 shrink group min-w-0 rounded-lg">
+            <img src="/vinuni_logo.png" alt="VinUniversity Logo" className="h-10 w-auto object-contain transition-transform duration-300 group-hover:scale-105 dark:drop-shadow-[0_0_10px_rgba(255,255,255,0.2)] shrink-0" />
             <div className="hidden lg:block min-w-0">
-              <strong className="block text-xs font-black text-[#102451] uppercase tracking-wider leading-none">Kho lưu trữ tri thức khoa CNTT</strong>
+              <strong className="block text-base font-black text-[#102451] dark:text-blue-100 dark:drop-shadow-[0_0_10px_rgba(147,197,253,0.6)] uppercase tracking-wider leading-none transition-all truncate">Kho lưu trữ tri thức khoa CNTT</strong>
             </div>
           </Link>
           
-          <nav className="hidden lg:flex items-center gap-1.5" aria-label="Điều hướng ngang">
+          <nav className="hidden lg:flex items-center gap-1.5 shrink-0" aria-label="Điều hướng ngang">
             {groups.map((group) => {
               if (group.items.length === 1) {
                 const item = group.items[0];
@@ -258,20 +280,28 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`px-3 py-2 text-[13px] font-bold rounded-lg border transition-all ${
+                    className={`inline-flex items-center whitespace-nowrap px-2 xl:px-3 py-2 text-sm rounded-lg border border-transparent transition-all ${
                       active 
-                        ? "border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-400" 
-                        : "border-transparent text-gray-600 dark:text-gray-300 hover:border-blue-300 hover:bg-blue-100/80 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-blue-900/30 dark:hover:text-blue-300"
+                        ? "bg-transparent text-black dark:text-white" 
+                        : "text-black dark:text-blue-100 hover:bg-transparent hover:text-black dark:hover:text-white"
                     }`}
                   >
-                    {item.label}
+                    <span className="top-nav-label">{item.label}</span>
                   </Link>
                 );
               }
               return (
                 <div key={group.label} className="relative group">
-                  <button className="flex items-center gap-1 px-3 py-2 text-[13px] font-bold text-gray-600 dark:text-gray-300 rounded-lg border border-transparent hover:border-blue-300 hover:bg-blue-100/80 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-blue-900/30 dark:hover:text-blue-300 transition-all cursor-pointer">
-                    <span>{group.label}</span>
+                  <button 
+                    onClick={() => router.push(group.items[0].href)}
+                    className={`inline-flex items-center whitespace-nowrap gap-1 px-2 xl:px-3 py-2 text-sm rounded-lg border border-transparent transition-all cursor-pointer ${
+                      group.items.some(item => path === item.href.split("?")[0])
+                        ? "bg-transparent text-black dark:text-white" 
+                        : "text-black dark:text-blue-100 hover:bg-transparent hover:text-black dark:hover:text-white"
+                    }`}
+                  >
+                    <span className="top-nav-label">{group.label}</span>
+                    <ChevronDown size={14} className="top-nav-chevron opacity-70 group-hover:rotate-180 transition-transform duration-200" />
                   </button>
                   <div className="absolute left-0 top-full opacity-0 invisible translate-y-1 group-hover:opacity-100 group-hover:visible group-hover:translate-y-0 transition-all duration-200 pt-1 z-50">
                     <div className="bg-white dark:bg-slate-900 border border-[var(--border)] rounded-xl shadow-xl py-1 w-52">
@@ -281,11 +311,11 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
                            <Link
                              key={item.href}
                              href={item.href}
-                             className={`block mx-1.5 my-0.5 px-3 py-2 text-xs font-bold rounded-lg border transition-all ${
+                             className={`block mx-1.5 my-0.5 px-3 py-2 text-sm font-bold rounded-lg border border-transparent transition-all ${
                                active 
-                                 ? "border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-400" 
-                                 : "border-transparent text-gray-700 dark:text-gray-200 hover:border-blue-300 hover:bg-blue-100/70 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-slate-800"
-                             }`}
+                                 ? "bg-slate-50 text-[#102451] dark:bg-slate-800 dark:text-white" 
+                                 : "text-gray-700 dark:text-gray-200 hover:bg-slate-50 hover:text-[#102451] dark:hover:bg-slate-800 dark:hover:text-blue-200"
+                              }`}
                            >
                              {item.label}
                            </Link>
@@ -297,37 +327,81 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
               );
             })}
 
-            <Link
-              href="/support"
-              className={`px-3 py-2 text-[13px] font-bold rounded-lg border transition-all ${
-                path === "/support"
-                  ? "border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-400 font-bold"
-                  : "border-transparent text-gray-600 dark:text-gray-300 hover:border-blue-300 hover:bg-blue-100/80 hover:text-blue-700 dark:hover:border-blue-800 dark:hover:bg-blue-900/30 dark:hover:text-blue-300"
-              }`}
-            >
-              Hỗ trợ
-            </Link>
           </nav>
         </div>
 
-        <div className="flex items-center gap-3">
-          <form onSubmit={submitHeaderSearch} className="hidden xl:flex h-10 w-44 md:w-56 lg:w-64 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 text-left text-sm text-[var(--muted)] focus-within:border-blue-300 focus-within:text-blue-700">
-            <Search size={16}/>
-            <input className="min-w-0 flex-1 bg-transparent text-xs outline-none" value={headerQuery} onChange={event => setHeaderQuery(event.target.value)} placeholder="Tìm tài liệu..." />
+        <div className="flex items-center gap-2 xl:gap-3 shrink-0">
+          <form onSubmit={submitHeaderSearch} className="hidden xl:flex h-10 w-36 xl:w-48 2xl:w-64 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 text-left text-base text-[var(--muted)] focus-within:border-blue-300 focus-within:text-blue-700 dark:focus-within:border-blue-400 dark:focus-within:text-blue-300 dark:focus-within:drop-shadow-[0_0_8px_rgba(96,165,250,0.4)] shrink-0">
+            <Search size={18}/>
+            <input className="min-w-0 flex-1 bg-transparent text-sm outline-none dark:text-gray-200 placeholder:dark:text-gray-500" value={headerQuery} onChange={event => setHeaderQuery(event.target.value)} placeholder="Tìm tài liệu..." />
           </form>
-          <button className="icon-btn cursor-pointer" aria-label="Đổi giao diện" onClick={() => setDark(!dark)}>{dark ? <Sun size={17}/> : <Moon size={17}/>}</button>
+          <button 
+            className={`relative flex items-center justify-center h-10 w-10 rounded-full border transition-all duration-500 shrink-0 ${
+              dark 
+                ? "bg-indigo-950/40 border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_rgba(99,102,241,0.6)] hover:bg-indigo-900/50" 
+                : "bg-amber-50 border-amber-300/60 shadow-[0_0_15px_rgba(251,191,36,0.4)] hover:shadow-[0_0_25px_rgba(251,191,36,0.6)] hover:bg-amber-100"
+            }`}
+            aria-label="Đổi giao diện" 
+            onClick={() => setDark(!dark)}
+          >
+            {/* Moon Icon (Dark Mode) */}
+            <Moon 
+              size={20} 
+              className={`absolute text-indigo-400 transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
+                dark 
+                  ? "opacity-100 rotate-0 scale-100 animate-moon-effect" 
+                  : "opacity-0 -rotate-90 scale-50"
+              }`} 
+            />
+            {/* Sun Icon (Light Mode) */}
+            <Sun 
+              size={20} 
+              className={`absolute text-amber-500 transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
+                dark 
+                  ? "opacity-0 rotate-90 scale-50" 
+                  : "opacity-100 rotate-0 scale-100 animate-sun-effect"
+              }`} 
+            />
+          </button>
+          <Link href="/auto-ingestion" className="hidden md:flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-xs font-semibold text-[#102451] dark:text-blue-200 hover:border-blue-300 hover:text-blue-700 dark:hover:border-blue-400 dark:hover:text-blue-100 dark:hover:drop-shadow-[0_0_10px_rgba(147,197,253,0.6)] transition-all shrink-0">
+            <FolderSync size={16}/>
+            <span className="hidden lg:inline">Tải tự động</span>
+            {(desktopPendingCount > 0 || desktopActiveCount > 0) && (
+              <span className="badge badge-amber">{desktopPendingCount > 0 ? `${desktopPendingCount} chờ` : `${desktopActiveCount} chạy`}</span>
+            )}
+          </Link>
           <UploadNotificationMenu />
-          <div className="flex items-center gap-2 border-l border-[var(--border)] pl-3">
-            <div className="grid h-9 w-9 place-items-center rounded-full bg-[#102451] text-xs font-bold text-white shrink-0">
+          <div className="relative group flex items-center gap-2 border-l border-[var(--border)] pl-3 cursor-pointer h-full">
+            <div className="grid h-10 w-10 place-items-center rounded-full bg-[#102451] dark:bg-blue-900/80 dark:border dark:border-blue-500 dark:drop-shadow-[0_0_8px_rgba(59,130,246,0.6)] text-sm font-bold text-white shrink-0 transition-all">
               {user.code.slice(0, 2)}
             </div>
             <div className="hidden md:block text-left">
-              <strong className="block text-xs leading-none">{user.name}</strong>
-              <span className="muted text-[10px] block mt-0.5">{ROLE_LABELS[appRole]}</span>
+              <strong className="block text-sm leading-none dark:text-blue-50">{user.name}</strong>
+              <span className="muted text-xs block mt-0.5 dark:text-blue-200/70">{ROLE_LABELS[appRole]}</span>
             </div>
-            <button className="icon-btn ml-1 cursor-pointer" aria-label="Đăng xuất" onClick={async () => { await logout(); router.push("/"); }}>
-              <LogOut size={15}/>
-            </button>
+            <ChevronDown size={16} className="muted ml-1 transition-transform group-hover:rotate-180 dark:text-blue-200/70" />
+            
+            <div className="absolute right-0 top-[120%] w-52 opacity-0 invisible translate-y-2 group-hover:opacity-100 group-hover:visible group-hover:translate-y-0 transition-all duration-200 z-50">
+              <div className="bg-white dark:bg-slate-900 rounded-xl border border-[var(--border)] shadow-xl overflow-hidden py-1">
+                <div className="px-4 py-3 border-b border-[var(--border)] mb-1 bg-slate-50/50 dark:bg-slate-800/50">
+                  <strong className="block text-xs text-[#102451] dark:text-blue-100 mb-1">{user.name}</strong>
+                  <span className="block text-[10px] text-gray-500 font-medium">@{user.code}</span>
+                </div>
+                <Link href="/profile" className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-blue-900/40 transition-colors text-left">
+                  <User size={14} className="text-blue-500" /> Hồ sơ cá nhân
+                </Link>
+                <Link href="/support" className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-blue-900/40 transition-colors text-left">
+                  <HelpCircle size={14} className="text-blue-500" /> Hỗ trợ
+                </Link>
+                <Link href="/settings" className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-blue-900/40 transition-colors text-left">
+                  <FolderSync size={14} className="text-emerald-500" /> Watched folder
+                </Link>
+                <div className="border-t border-[var(--border)] my-1"></div>
+                <button onClick={async () => { await logout(); window.location.href = "/"; }} className="w-full flex items-center gap-2.5 px-4 py-2.5 text-xs font-semibold text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-left">
+                  <LogOut size={14} /> Đăng xuất
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </header>
@@ -336,27 +410,55 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
       {mobile && renderMobileMenu()}
 
       {/* Main Content Area */}
-      <main className="flex-1 mx-auto w-full max-w-[1680px] p-4 md:p-7">
-        {children}
+      <main className={`flex-1 flex min-h-0 w-full justify-center p-3 md:p-5 xl:p-6 transition-all duration-500 ease-in-out ${assistantOpen ? "md:pr-[420px] xl:pr-[440px]" : ""}`}>
+        <div className="flex min-h-0 w-full max-w-[1600px] flex-1">
+          {children}
+        </div>
       </main>
 
       {/* Persistent AI Assistant chat sidebar */}
-      {canUseAssistant && (
+      {canUseAssistant && path !== "/assistant" && (
         <>
           {!assistantOpen && (
-            <button
-              className="fixed bottom-5 right-5 z-[70] inline-flex h-12 items-center gap-2 rounded-full bg-[#102451] px-4 text-sm font-bold text-white shadow-xl shadow-blue-950/20 transition hover:bg-[#C92027] cursor-pointer"
-              onClick={() => setAssistantOpen(true)}
-              aria-label="Mở trợ lý AI"
-            >
-              <Bot size={18}/>
-              <span className="hidden sm:inline">Trợ lý AI</span>
-            </button>
+            <div className={`fixed bottom-4 right-4 md:bottom-8 md:right-8 z-[70] group transition-all duration-700 ease-in-out transform ${mascotVisible ? "translate-x-0 opacity-100" : "translate-x-32 opacity-0 pointer-events-none"}`}>
+              <button
+                className="relative inline-flex items-center justify-center transition-all duration-300 cursor-pointer hover:-translate-y-2 active:translate-y-2 hover:scale-105 drop-shadow-[0_20px_20px_rgba(0,0,0,0.3)]"
+                onClick={() => setAssistantOpen(true)}
+                aria-label="Mở trợ lý AI"
+              >
+                <style dangerouslySetInnerHTML={{ __html: `
+                  @keyframes floatMascot {
+                    0% { transform: translateY(0px) rotate(0deg); }
+                    33% { transform: translateY(-8px) rotate(3deg); }
+                    66% { transform: translateY(4px) rotate(-2deg); }
+                    100% { transform: translateY(0px) rotate(0deg); }
+                  }
+                  .animate-float-mascot {
+                    animation: floatMascot 4s ease-in-out infinite;
+                  }
+                `}} />
+                
+                {/* Hào quang phía sau (Glow) */}
+                <div className="absolute inset-0 top-1/4 rounded-full bg-cyan-400/20 animate-ping pointer-events-none blur-2xl duration-1000"></div>
+                
+                {/* Hình dáng Mascot */}
+                <img src="/bot-avatar.png" alt="Trợ lý AI" className="w-24 h-24 md:w-32 md:h-32 object-contain animate-float-mascot" />
+                
+                {/* Bóng dưới chân (Ground Shadow) */}
+                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-16 h-3 bg-black/20 rounded-full blur-sm animate-pulse pointer-events-none"></div>
+
+                {/* Bong bóng chat (Speech Bubble) hiển thị khi hover */}
+                <div className="absolute -top-4 left-1/2 -translate-x-1/2 whitespace-nowrap bg-white text-[#102451] text-sm font-black px-4 py-2 rounded-2xl shadow-xl opacity-0 group-hover:opacity-100 transition-all duration-300 pointer-events-none transform group-hover:-translate-y-2">
+                  Hỏi đáp cùng Trợ lý AI!
+                  <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white rotate-45"></div>
+                </div>
+              </button>
+            </div>
           )}
           {assistantOpen && (
-            <div className="fixed inset-0 z-[90] pointer-events-none">
+            <div className="fixed top-[72px] bottom-0 left-0 right-0 z-[90] pointer-events-none">
               <div className="absolute inset-0 bg-slate-950/20 opacity-100 md:hidden pointer-events-auto" onClick={() => setAssistantOpen(false)}/>
-              <aside className="pointer-events-auto absolute inset-y-0 right-0 w-[min(440px,100vw)] border-l border-[var(--border)] bg-[var(--card)] shadow-2xl">
+              <aside className="pointer-events-auto absolute top-3 right-3 bottom-3 md:top-4 md:right-4 md:bottom-4 w-[calc(100vw-24px)] md:w-[380px] xl:w-[400px] rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-2xl overflow-hidden flex flex-col">
                 <AssistantChat variant="panel" context={assistantContext} onClose={() => setAssistantOpen(false)}/>
               </aside>
             </div>

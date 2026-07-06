@@ -1,0 +1,148 @@
+﻿name: he_thong_kho_luu_tru_tri_thuc_demo
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    env_file:
+      - ../../.env.demo
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-allowed-packet=512M
+      - --binlog-expire-logs-seconds=604800
+    volumes:
+      - demo_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - eduvault_demo
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    env_file:
+      - ../../.env.demo
+    command: server /data --console-address ":${MINIO_CONSOLE_PORT}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - demo_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${MINIO_API_PORT}/minio/health/live > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - eduvault_demo
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    env_file:
+      - ../../.env.demo
+    volumes:
+      - demo_qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/${QDRANT_PORT}; exec 3>&-'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - eduvault_demo
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.backend
+    restart: unless-stopped
+    env_file:
+      - ../../.env.demo
+    environment:
+      DATABASE_PROVIDER: ${DATABASE_PROVIDER}
+      DATABASE_FALLBACK_SQLITE: ${DATABASE_FALLBACK_SQLITE}
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      MINIO_ENABLED: ${MINIO_ENABLED}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_SECURE: ${MINIO_SECURE}
+      QDRANT_ENABLED: ${QDRANT_ENABLED}
+      QDRANT_URL: ${QDRANT_URL}
+      REDIS_ENABLED: ${REDIS_ENABLED}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      MYSQL_CONNECT_TIMEOUT_SECONDS: ${MYSQL_CONNECT_TIMEOUT_SECONDS:-3}
+      MYSQL_STARTUP_MAX_WAIT_SECONDS: ${MYSQL_STARTUP_MAX_WAIT_SECONDS:-45}
+      MYSQL_STARTUP_BACKOFF_BASE_SECONDS: ${MYSQL_STARTUP_BACKOFF_BASE_SECONDS:-0.5}
+      MYSQL_STARTUP_BACKOFF_MAX_SECONDS: ${MYSQL_STARTUP_BACKOFF_MAX_SECONDS:-5}
+    command: ["uvicorn", "src.eduvault.main:app", "--host", "0.0.0.0", "--port", "${BACKEND_PORT}"]
+    volumes:
+      - demo_app_data:/app/data/mvp
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\\\"BACKEND_PORT\\\",\\\"8080\\\")}/api/health', timeout=5)\""]
+      interval: 15s
+      timeout: 8s
+      retries: 10
+      start_period: 75s
+    networks:
+      - eduvault_demo
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        BACKEND_URL: http://backend:${BACKEND_PORT}
+    restart: unless-stopped
+    env_file:
+      - ../../.env.demo
+    environment:
+      PORT: ${FRONTEND_PORT}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:' + (process.env.PORT || '3000')).then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))\""]
+      interval: 15s
+      timeout: 8s
+      retries: 10
+      start_period: 40s
+    networks:
+      - eduvault_demo
+    ports:
+      - "${FRONTEND_PORT}:3000"
+
+volumes:
+  demo_mysql_data:
+  demo_minio_data:
+  demo_qdrant_data:
+  demo_app_data:
+
+networks:
+  eduvault_demo:
+    driver: bridge
+

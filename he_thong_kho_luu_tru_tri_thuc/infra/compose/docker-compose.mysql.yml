@@ -1,0 +1,29 @@
+﻿name: he_thong_kho_luu_tru_tri_thuc_mysql
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: eduvault-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: eduvault
+      MYSQL_USER: eduvault
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-allowed-packet=512M
+    ports:
+      - "3307:3306"
+    volumes:
+      - eduvault_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  eduvault_mysql_data:
+

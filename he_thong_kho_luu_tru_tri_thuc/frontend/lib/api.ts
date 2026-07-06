@@ -1,6 +1,12 @@
-// Same-origin requests are proxied by Next.js. Set NEXT_PUBLIC_API_URL only
-// when the browser intentionally calls an API exposed on a separate domain.
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+// Same-origin requests are proxied by Next.js. When a public API URL is
+// configured, prefer calling it directly so the browser can survive a broken
+// frontend rewrite in production.
+const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+export const API_URL = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(configuredApiUrl) ? "" : configuredApiUrl;
+
+function requestTargets(path: string): string[] {
+  return API_URL ? [`${API_URL}${path}`, path] : [path];
+}
 
 export type User = {
   code: string;
@@ -51,7 +57,7 @@ export type FolderNode = {
   id: string;
   name: string;
   parent_id?: string;
-  type: "faculty" | "department" | "specialization" | "course" | "standard_folder" | "folder";
+  type: "faculty" | "department" | "specialization" | "course" | "standard_folder" | "folder" | "document_type_folder";
   policy_id: string;
   path: string;
   status: "active" | "deprecated";
@@ -110,6 +116,34 @@ export type ProfileSpecializations = {
   selected_ids: string[];
   folder_tree?: LecturerFolderNode;
   message?: string;
+};
+
+export type DesktopSyncFolder = {
+  id?: string;
+  folder_path: string;
+  folder_label: string;
+  enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type DesktopSyncFoldersResponse = {
+  folders: DesktopSyncFolder[];
+  watch_folders?: string[];
+};
+
+export type DesktopAgentStatus = {
+  installed: boolean;
+  online: boolean;
+  version: string;
+  watch_folders: string[];
+  last_sync: string;
+  last_seen_at: string;
+  connection_status: string;
+  status: "online" | "offline" | "error" | string;
+  status_text: string;
+  device_id: string;
+  last_error: string;
 };
 
 export type DocumentDetail = Document & {
@@ -192,16 +226,31 @@ export async function api<T>(path: string, options: RequestInit = {}, token?: st
   if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
+
+  let lastError: ApiError | null = null;
+  for (const target of requestTargets(path)) {
+    const response = await fetch(target, { ...options, headers, credentials: "include" });
+    if (response.ok) {
+      return response.json() as Promise<T>;
+    }
+
     let message = `Máy chủ trả về lỗi HTTP ${response.status}.`;
     try {
       const data = await response.json();
       message = data.detail || data.error || message;
     } catch {}
-    throw new ApiError(response.status, message);
+
+    lastError = new ApiError(response.status, message);
+    const shouldRetrySameOrigin =
+      Boolean(API_URL) &&
+      target !== path &&
+      [500, 502, 503, 504].includes(response.status);
+    if (!shouldRetrySameOrigin) {
+      throw lastError;
+    }
   }
-  return response.json() as Promise<T>;
+
+  throw lastError ?? new ApiError(500, "Không thể kết nối tới máy chủ.");
 }
 
 export function formatDate(value?: string) {

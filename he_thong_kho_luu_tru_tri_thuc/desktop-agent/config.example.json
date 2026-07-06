@@ -1,0 +1,26 @@
+{
+  "watch_folder": "D:\\Teaching",
+  "watch_folders": [
+    "D:\\Teaching"
+  ],
+  "remote_watch_config_loaded": false,
+  "remote_config_poll_interval": 60,
+  "local_control_host": "127.0.0.1",
+  "local_control_port": 8765,
+  "path_mappings": [],
+  "active_backend": "deploy",
+  "backend_profiles": {
+    "local": "http://127.0.0.1:8080",
+    "deploy": "https://api.example.edu"
+  },
+  "backend_url": "https://api.example.edu",
+  "token": "",
+  "user_code": "",
+  "retry_limit": 10,
+  "poll_interval": 5,
+  "stable_seconds": 1.5,
+  "chunk_size_bytes": 5242880,
+  "device_id": "",
+  "queue_db": "desktop-agent.db",
+  "log_file": "logs/desktop-agent.log"
+}

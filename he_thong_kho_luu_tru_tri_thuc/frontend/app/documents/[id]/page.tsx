@@ -105,17 +105,13 @@ function DocumentFileViewer({ files }: { files: Provenance["files"] }) {
       });
       const selected = sorted.find(isPdfFile) || sorted.find(isImageFile) || sorted.find(isDocxFile) || sorted[0];
       if (!selected?.id) return;
-      if (!token) {
-        setViewerError("Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại để xem file.");
-        return;
-      }
-
       setViewerLoading(true);
       setViewerName(selected.original_name || "file");
       setViewerMime(selected.mime_type || "application/octet-stream");
       try {
         const response = await fetch(`${API_URL}/api/files/${selected.id}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          credentials: "include",
         });
         if (!response.ok) throw new Error(`Không tải được file (HTTP ${response.status})`);
         const blob = await response.blob();
@@ -281,7 +277,10 @@ export default function DocumentViewer() {
   }
 
   async function download(assetId: string, name: string) {
-    const r = await fetch(`${API_URL}/api/files/${assetId}`, { headers: { Authorization: `Bearer ${token}` } });
+    const r = await fetch(`${API_URL}/api/files/${assetId}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      credentials: "include",
+    });
     if (!r.ok) return;
     const url = URL.createObjectURL(await r.blob());
     const a = document.createElement("a"); a.href = url; a.download = name; a.click();
@@ -291,7 +290,6 @@ export default function DocumentViewer() {
   useEffect(() => {
     let revoked = false;
     let currentUrl: string | null = null;
-    if (!token) return;
     return;
     async function loadPdf() {
       setPdfError("");
@@ -313,7 +311,8 @@ export default function DocumentViewer() {
 
       try {
         const r = await fetch(`${API_URL}/api/files/${pdf.id}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          credentials: "include",
         });
 
         if (!r.ok) throw new Error(`Không tải được PDF (HTTP ${r.status})`);

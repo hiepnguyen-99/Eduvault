@@ -11,7 +11,7 @@ from .database import now, rows
 
 NODE_TYPES = {"faculty", "department", "specialization", "course", "standard_folder", "folder"}
 RULE_TYPES = {"permission", "storage_rule", "retention", "visibility"}
-ACTION_TYPES = {"add_node", "move_node", "rename_node", "delete_node", "update_permission", "update_storage_rule"}
+ACTION_TYPES = {"add_node", "move_node", "rename_node", "delete_node", "update_permission", "update_storage_rule", "upload_json"}
 
 
 def _id(prefix: str) -> str:
@@ -315,6 +315,41 @@ def _find_folder_node(db, text: str):
     return None
 
 
+def _folder_node_matches(db, text: str) -> tuple[list[dict], list[dict]]:
+    folded = _fold(text)
+    if not folded:
+        return [], []
+    candidates = rows(db.execute("SELECT * FROM folder_nodes WHERE status='active' ORDER BY LENGTH(path) DESC").fetchall())
+    exact: list[dict] = []
+    partial: list[dict] = []
+    seen_ids: set[str] = set()
+    for node in candidates:
+        name = _fold(node["name"])
+        path = _fold(node["path"])
+        if name == folded or path == folded:
+            if node["id"] not in seen_ids:
+                exact.append(node)
+                seen_ids.add(node["id"])
+            continue
+        if folded in name or folded in path or name in folded or path in folded:
+            if node["id"] not in seen_ids:
+                partial.append(node)
+                seen_ids.add(node["id"])
+    return exact, partial
+
+
+def _resolve_folder_node(db, text: str, *, action: str, message: str) -> tuple[dict | None, dict | None]:
+    exact, partial = _folder_node_matches(db, text)
+    if len(exact) == 1:
+        return exact[0], None
+    if len(exact) > 1:
+        partial = exact
+    if partial:
+        candidates = [{"id": node["id"], "name": node["name"], "path": node["path"]} for node in partial[:5]]
+        return None, {"status": "ask_clarification", "message": message, "action": action, "candidates": candidates}
+    return None, None
+
+
 def parse_policy_command(db, command: str) -> dict:
     text = re.sub(r"\s+", " ", (command or "").strip())
     folded = _fold(text)
@@ -323,7 +358,14 @@ def parse_policy_command(db, command: str) -> dict:
 
     if any(token in folded for token in ("xoa ", "xoa nut", "xoa thu muc")):
         target = re.sub(r"^(xoa|xoa nut|xoa thu muc)\s+", "", folded).strip()
-        node = _find_folder_node(db, target)
+        node, clarification = _resolve_folder_node(
+            db,
+            target,
+            action="delete_node",
+            message="Tim thay nhieu node gan giong. Hay noi ro ten hoac duong dan day du cua node can xoa.",
+        )
+        if clarification:
+            return clarification
         if not node:
             return {"status": "ask_clarification", "message": "Can noi ro node can xoa.", "action": "delete_node"}
         return {"status": "need_confirmation", "action": "delete_node", "node_id": node["id"], "node_name": node["name"]}
@@ -332,7 +374,14 @@ def parse_policy_command(db, command: str) -> dict:
         match = re.search(r"(?:doi ten|rename)\s+(.+?)\s+(?:thanh|to)\s+(.+)$", folded)
         if not match:
             return {"status": "ask_clarification", "message": "Hay dung dang: Doi ten <node> thanh <ten moi>.", "action": "rename_node"}
-        node = _find_folder_node(db, match.group(1))
+        node, clarification = _resolve_folder_node(
+            db,
+            match.group(1),
+            action="rename_node",
+            message="Tim thay nhieu node gan giong. Hay noi ro ten hoac duong dan day du cua node can doi ten.",
+        )
+        if clarification:
+            return clarification
         if not node:
             return {"status": "ask_clarification", "message": "Khong tim thay node can doi ten.", "action": "rename_node"}
         return {"status": "need_confirmation", "action": "rename_node", "node_id": node["id"], "new_name": match.group(2).strip()}
@@ -341,8 +390,22 @@ def parse_policy_command(db, command: str) -> dict:
         match = re.search(r"(?:chuyen|di chuyen|move)\s+(.+?)\s+(?:vao|sang|toi|to)\s+(.+)$", folded)
         if not match:
             return {"status": "ask_clarification", "message": "Hay dung dang: Chuyen <node> vao <node cha>.", "action": "move_node"}
-        node = _find_folder_node(db, match.group(1))
-        parent = _find_folder_node(db, match.group(2))
+        node, node_clarification = _resolve_folder_node(
+            db,
+            match.group(1),
+            action="move_node",
+            message="Tim thay nhieu node nguon gan giong. Hay noi ro ten hoac duong dan day du cua node can chuyen.",
+        )
+        if node_clarification:
+            return node_clarification
+        parent, parent_clarification = _resolve_folder_node(
+            db,
+            match.group(2),
+            action="move_node",
+            message="Tim thay nhieu node cha gan giong. Hay noi ro ten hoac duong dan day du cua node cha moi.",
+        )
+        if parent_clarification:
+            return parent_clarification
         if not node or not parent:
             return {"status": "ask_clarification", "message": "Can xac dinh ro node nguon va node cha moi.", "action": "move_node"}
         return {"status": "need_confirmation", "action": "move_node", "node_id": node["id"], "new_parent_id": parent["id"]}
@@ -379,7 +442,16 @@ def parse_policy_command(db, command: str) -> dict:
             return {"status": "ask_clarification", "message": "Hay noi ro node can them va vi tri cha.", "action": "add_node"}
         name = match.group(1).strip()
         parent_text = (match.group(2) or "").strip()
-        parent = _find_folder_node(db, parent_text) if parent_text else None
+        parent = None
+        if parent_text:
+            parent, clarification = _resolve_folder_node(
+                db,
+                parent_text,
+                action="add_node",
+                message="Tim thay nhieu node cha gan giong. Hay noi ro ten hoac duong dan day du cua node cha.",
+            )
+            if clarification:
+                return clarification
         if parent_text and not parent:
             return {"status": "ask_clarification", "message": "Khong tim thay node cha. Hay chon node cha cu the.", "action": "add_node", "name": name}
         node_type = "course"
@@ -395,14 +467,23 @@ def parse_policy_command(db, command: str) -> dict:
 
 
 def preview_policy_action(db, actor: dict, command: str) -> dict:
-    action = parse_policy_command(db, command)
+    command_str = (command or "").strip()
+    if command_str.startswith("{") and command_str.endswith("}"):
+        try:
+            parsed = json.loads(command_str)
+            action = {"status": "need_confirmation", "action": "upload_json", "payload": parsed}
+        except Exception:
+            action = {"status": "ask_clarification", "message": "JSON policy khong hop le. Vui long kiem tra lai."}
+    else:
+        action = parse_policy_command(db, command_str)
+
     request_id = _id("pcr")
     preview = {
         "status": action["status"],
         "action": action,
         "intent": action.get("action"),
-        "understood": action.get("message") or _action_summary(db, action) if action.get("action") else action.get("message", ""),
-        "tree_changes": action if action.get("action") in {"add_node", "move_node", "rename_node", "delete_node"} else {},
+        "understood": "Upload/Cap nhat toan bo Policy tu file JSON." if action.get("action") == "upload_json" else (action.get("message") or _action_summary(db, action) if action.get("action") else action.get("message", "")),
+        "tree_changes": action if action.get("action") in {"add_node", "move_node", "rename_node", "delete_node", "upload_json"} else {},
         "permission_changes": action if action.get("action") in {"update_permission", "update_storage_rule"} else {},
         "warnings": [],
     }
@@ -451,6 +532,17 @@ def apply_policy_action(db, actor: dict, action: dict, *, source: str = "api") -
         result = delete_policy_node(db, actor, action["node_id"])
     elif kind == "update_permission":
         result = create_policy_rule(db, actor, {"rule_type": "permission", "scope_type": action.get("scope_type", "faculty"), "scope_id": action.get("scope_id"), "value": action.get("value", {})})
+    elif kind == "upload_json":
+        from .services import create_policy_file
+        # Generate a unique title and filename based on time
+        title = f"Policy Chatbot Update {now()[:19]}"
+        filename = f"policy_{uuid.uuid4().hex[:8]}.json"
+        raw_bytes = _json(action.get("payload", {})).encode("utf-8")
+        result = create_policy_file(db, actor, title, filename, raw_bytes, "application/json")
+        # Automatically activate the uploaded policy
+        from .services import activate_policy_file
+        activate_policy_file(db, actor, result["id"])
+        result["status"] = "activated"
     else:
         result = create_policy_rule(db, actor, {"rule_type": "storage_rule", "scope_type": action.get("scope_type", "faculty"), "scope_id": action.get("scope_id"), "value": action.get("value", {})})
     policy_audit(db, actor, f"policy.action.{kind}", "policy_action", result.get("id"), before, result, "success", source)

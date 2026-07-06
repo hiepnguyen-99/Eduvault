@@ -1,11 +1,11 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { Children, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, ChevronDown, ChevronRight, File, FilePenLine, FilePlus2, Folder, FolderOpen, LayoutGrid, List, LoaderCircle, Pencil, Search, Send, Trash2, Upload } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
-import { useUploadTasks } from "@/components/upload-task-provider";
+import { labelForUploadSource, useUploadTasks } from "@/components/upload-task-provider";
 import { DashboardData, Document, DocumentDetail, FolderNode, formatDate, MyFolderTree } from "@/lib/api";
 import { useBackendData } from "@/lib/hooks";
 import { PageHeader, Panel } from "@/components/ui";
@@ -94,6 +94,7 @@ export default function Repository() {
   const launchedProgress=launchedTask?Math.round(launchedTask.uploaded_bytes/launchedTask.total_bytes*100):0;
   const launchedActive=!!launchedTask&&!["completed","failed","pending_confirmation"].includes(launchedTask.status);
   const classificationTicket=launchedTask?.metadata.classification_ticket;
+  const launchedSourceLabel=labelForUploadSource(launchedTask?.metadata.source_type);
   const finalDestination=useMemo(()=>{
     const selectedByPath=metadata.folder_path?folderOptions.find(option=>option.path===metadata.folder_path):undefined;
     const selectedNode=metadata.folder_node_id?folderOptions.find(option=>option.id===metadata.folder_node_id):selectedByPath;
@@ -523,18 +524,23 @@ export default function Repository() {
     finally{setStartingUpload(false);}
   }
 
-  return <div><PageHeader eyebrow="Kho tri thức" title="Kho tài liệu" description={`${data.stats.documents} tài liệu đang được lưu trong hệ thống.`} actions={<><button className="btn-secondary" onClick={openCreate}><FilePlus2 size={15}/>Tạo tài liệu</button><button className="btn-primary" onClick={()=>{setMessage("");setUploadOpen(true)}}><Upload size={15}/>Tải tệp lên</button></>}/>
-    {(error||message||myFolderTree.message)&&<p className="mb-4 rounded bg-amber-50 p-3 text-xs text-amber-800">{error||message||myFolderTree.message}</p>}
-    <div className="grid gap-4 transition-all duration-300 xl:grid-cols-[420px_minmax(0,1fr)] xl:items-start">
-      <section className="app-card min-w-0 overflow-hidden transition-all duration-300">
-        <div className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3"><div><h2 className="section-title">{myFolderTree.policy?"Kho của tôi theo cây tri thức chuẩn":"Kho tài liệu"}</h2><p className="muted mt-0.5 text-[11px]">{myFolderTree.policy?`Chính sách đang áp dụng: ${myFolderTree.policy.title}`:"Dùng đường dẫn thư mục hiện có"}</p></div></div>
-        <FolderNavigation tree={virtualFolderTree} selectedPath={selectedFolder} selectedFileId={selected?.id||""} onSelectFolder={path=>{setSelectedFolder(path);setSelected(null)}} onOpenFile={id=>router.push(`/documents/${id}`)}/>
-      </section>
-      <Panel title={selectedFolder||"Tất cả tài liệu"} description={loading?"Đang tải...":`${docs.length} tài liệu`}><div className="flex flex-wrap gap-2 border-b border-[var(--border)] p-3"><div className="relative min-w-48 flex-1"><Search className="muted absolute left-3 top-2.5" size={15}/><input className="field pl-9" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Tìm tài liệu trong thư mục..."/></div><button className="icon-btn" aria-label="Dạng danh sách"><List size={15}/></button><button className="icon-btn" aria-label="Dạng lưới"><LayoutGrid size={15}/></button></div>
-        <div className="table-shell"><table className="data-table"><thead><tr><th>Tên</th><th>Loại</th><th>Chủ sở hữu</th><th>Cập nhật</th><th>Quyền</th><th>Thao tác</th></tr></thead><tbody>{docs.map(d=><tr key={d.id} onClick={()=>setSelected(d)} className={current?.id===d.id?"bg-[var(--soft)]":""}><td><div className="flex items-center gap-2"><div className="h-8 w-8 rounded bg-red-50 text-red-600 grid place-items-center"><File size={15}/></div><div><Link href={`/documents/${d.id}`} className="font-bold hover:text-blue-600">{d.title}</Link><span className="muted block text-[10px]">{d.topic}</span><span className={`badge mt-1 ${documentStatusClass(d.status)}`}>{documentStatusLabel(d.status)}</span></div></div></td><td>{d.doc_type}</td><td>{d.owner_code}</td><td>{formatDate(d.updated_at)}</td><td><span className={`badge ${d.visibility==="public"?"badge-green":"badge-amber"}`}>{visibilityLabel(d.visibility)}</span></td><td>{canManage(d)&&<div className="flex gap-1"><button className="icon-btn" aria-label="Sửa tài liệu" disabled={busy} onClick={e=>{e.stopPropagation();openEdit(d)}}><FilePenLine size={15}/></button><button className="icon-btn text-red-600" aria-label="Xóa tài liệu" disabled={busy} onClick={e=>{e.stopPropagation();removeDocument(d)}}><Trash2 size={15}/></button></div>}</td></tr>)}</tbody></table></div>
-        {!docs.length&&<p className="muted p-8 text-center text-xs">Thư mục này chưa có tài liệu trực tiếp.</p>}
-      </Panel>
-    </div>
+  return <div className="pb-12">
+      <PageHeader eyebrow="Kho tri thức" title="Kho tài liệu" description={`${data.stats.documents} tài liệu đang được lưu trong hệ thống.`} actions={<><button className="btn-secondary app-card !bg-white/60 hover:!bg-white/90 shadow-sm" onClick={openCreate}><FilePlus2 size={15} className="text-blue-600"/>Tạo tài liệu</button><button className="btn-primary shadow-lg shadow-blue-500/30" onClick={()=>{setMessage("");setUploadOpen(true)}}><Upload size={15}/>Tải tệp lên</button></>}/>
+      {(error||message||myFolderTree.message)&&<p className="mb-4 rounded bg-amber-50 p-3 text-xs text-amber-800 shadow-sm">{error||message||myFolderTree.message}</p>}
+      <div className="grid gap-6 transition-all duration-300 xl:grid-cols-[380px_minmax(0,1fr)] xl:items-start mt-4">
+        <section className="app-card min-w-0 overflow-hidden transition-all duration-300">
+          <div className="flex items-center justify-between gap-3 border-b border-white/40 dark:border-white/5 px-5 py-4 bg-white/30 dark:bg-slate-800/30"><div><h2 className="section-title">{myFolderTree.policy?"Kho của tôi theo cây tri thức chuẩn":"Kho tài liệu"}</h2><p className="muted mt-0.5 text-xs font-medium">{myFolderTree.policy?`Chính sách đang áp dụng: ${myFolderTree.policy.title}`:"Dùng đường dẫn thư mục hiện có"}</p></div></div>
+          <div className="p-2"><FolderNavigation tree={virtualFolderTree} selectedPath={selectedFolder} selectedFileId={selected?.id||""} onSelectFolder={path=>{setSelectedFolder(path);setSelected(null)}} onOpenFile={id=>router.push(`/documents/${id}`)}/></div>
+        </section>
+        <section className="app-card overflow-hidden transition-all duration-300">
+          <div className="flex items-center justify-between gap-3 border-b border-white/40 dark:border-white/5 px-5 py-4 bg-white/30 dark:bg-slate-800/30">
+            <div><h2 className="section-title">{selectedFolder||"Tất cả tài liệu"}</h2><p className="muted mt-0.5 text-xs font-medium">{loading?"Đang tải...":`${docs.length} tài liệu`}</p></div>
+          </div>
+          <div className="flex flex-wrap gap-2 border-b border-white/40 dark:border-white/5 p-4"><div className="relative min-w-48 flex-1"><Search className="muted absolute left-3 top-2.5 text-blue-500" size={15}/><input className="field bg-white/60 dark:bg-slate-800/50 backdrop-blur-md border-white/80 dark:border-slate-700 focus:bg-white/90 dark:focus:bg-slate-800 transition-colors shadow-inner" style={{ paddingLeft: '36px' }} value={query} onChange={e=>setQuery(e.target.value)} placeholder="Tìm tài liệu trong thư mục..."/></div><button className="icon-btn bg-white/60 dark:bg-slate-800/50 dark:border-slate-700 hover:bg-white/90 dark:hover:bg-slate-700 shadow-sm" aria-label="Dạng danh sách"><List size={15}/></button><button className="icon-btn bg-white/60 dark:bg-slate-800/50 dark:border-slate-700 hover:bg-white/90 dark:hover:bg-slate-700 shadow-sm" aria-label="Dạng lưới"><LayoutGrid size={15}/></button></div>
+          <div className="table-shell"><table className="data-table"><thead><tr className="bg-white/20 dark:bg-slate-800/40"><th className="font-bold text-gray-700 dark:text-gray-200">Tên</th><th className="font-bold text-gray-700 dark:text-gray-200">Loại</th><th className="font-bold text-gray-700 dark:text-gray-200">Chủ sở hữu</th><th className="font-bold text-gray-700 dark:text-gray-200">Cập nhật</th><th className="font-bold text-gray-700 dark:text-gray-200">Quyền</th><th className="font-bold text-gray-700 dark:text-gray-200">Thao tác</th></tr></thead><tbody>{docs.map(d=><tr key={d.id} onClick={()=>setSelected(d)} className={`tech-hover-row cursor-pointer border-b border-white/20 dark:border-white/10 ${current?.id===d.id?"bg-[color-mix(in_srgb,var(--soft)_80%,transparent)]":""}`}><td><div className="flex items-center gap-3"><div className="relative h-11 w-11 rounded-2xl bg-gradient-to-br from-white/90 to-amber-50/40 dark:from-slate-800/80 dark:to-slate-900/60 border border-amber-200/60 dark:border-amber-500/30 text-amber-500 dark:text-amber-300 grid place-items-center shadow-[inset_0_0_12px_rgba(251,191,36,0.2)] dark:shadow-[inset_0_0_20px_rgba(251,191,36,0.3)] overflow-hidden"><div className="absolute inset-0 bg-amber-400/30 dark:bg-amber-400/20 blur-xl animate-pulse"></div><File size={20} className="relative z-10 drop-shadow-[0_0_6px_rgba(251,191,36,0.9)] animate-pulse" /></div><div><Link href={`/documents/${d.id}`} className="font-bold text-gray-800 dark:text-amber-50 hover:text-amber-600 dark:hover:text-amber-300 dark:hover:drop-shadow-[0_0_10px_rgba(251,191,36,0.5)] transition-all text-base">{d.title}</Link><span className="text-gray-500 dark:text-amber-100/60 block text-sm mt-0.5 font-medium">{d.topic}</span><span className={`badge mt-1 shadow-sm ${documentStatusClass(d.status)}`}>{documentStatusLabel(d.status)}</span></div></div></td><td><span className="font-medium text-gray-600 dark:text-gray-300">{d.doc_type}</span></td><td><span className="font-medium text-gray-600 dark:text-gray-300">{d.owner_code}</span></td><td><span className="text-gray-500 dark:text-gray-400 text-xs">{formatDate(d.updated_at)}</span></td><td><span className={`badge shadow-sm ${d.visibility==="public"?"badge-green":"badge-amber"}`}>{visibilityLabel(d.visibility)}</span></td><td>{canManage(d)&&<div className="flex gap-1"><button className="icon-btn bg-white/70 dark:bg-slate-800 dark:border-slate-600 hover:bg-blue-50 dark:hover:bg-slate-700 shadow-sm" aria-label="Sửa tài liệu" disabled={busy} onClick={e=>{e.stopPropagation();openEdit(d)}}><FilePenLine size={15} className="text-blue-600 dark:text-blue-400"/></button><button className="icon-btn bg-white/70 dark:bg-slate-800 dark:border-slate-600 hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600 dark:text-red-400 shadow-sm" aria-label="Xóa tài liệu" disabled={busy} onClick={e=>{e.stopPropagation();removeDocument(d)}}><Trash2 size={15}/></button></div>}</td></tr>)}</tbody></table></div>
+          {!docs.length&&<p className="muted p-12 text-center text-sm font-medium">Thư mục này chưa có tài liệu trực tiếp.</p>}
+        </section>
+      </div>
     {editorOpen&&<Modal onClose={()=>setEditorOpen(false)}><p className="eyebrow">{editing?"Chỉnh sửa tài liệu":"Tạo tài liệu thủ công"}</p><h2 className="page-title mt-1">{editing?"Cập nhật tài liệu":"Thêm tài liệu mới"}</h2><DocumentFields form={form} setForm={setForm}/>{message&&<p className="mt-3 rounded bg-amber-50 p-2 text-xs text-amber-800">{message}</p>}<div className="mt-5 flex justify-end gap-2"><button className="btn-secondary" onClick={()=>setEditorOpen(false)}>Hủy</button><button disabled={busy||!form.title||!form.topic||!form.content} className="btn-primary" onClick={saveDocument}>{busy&&<LoaderCircle className="animate-spin" size={15}/>}Lưu tài liệu</button></div></Modal>}
     {uploadOpen&&<Modal onClose={()=>{setUploadOpen(false);setFolderRequestSent(false);setNewFolderName("");setNewFolderParent("");setAiPanelPrompt("");}}><p className="eyebrow">Nhập tài liệu có hỗ trợ AI</p><h2 className="page-title mt-1">Tải tài liệu mới</h2><label className="mini-grid mt-5 block rounded-xl border-2 border-dashed border-blue-300 p-8 text-center"><Upload className="mx-auto text-blue-600"/><strong className="mt-3 block text-sm">{file?.name||"Chọn tệp để tải lên"}</strong>{file&&<span className="muted mt-1 block text-xs">{formatFileSize(file.size)} · tải theo chunk · AI xử lý nền · tối đa 250 MB</span>}<input type="file" className="hidden" disabled={launchedActive} onChange={e=>selectFile(e.target.files?.[0]||null)}/></label><div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="relative"><input className={`field w-full pr-8 ${autoAnalyzing?"opacity-60":""}`} placeholder={autoAnalyzing?"AI đang đọc tài liệu...":"Tên tài liệu"} value={metadata.title} disabled={autoAnalyzing} onChange={e=>{setMetadata(x=>({...x,title:e.target.value}));setUploadAsNew(false)}}/>{autoAnalyzing&&<LoaderCircle className="animate-spin absolute right-2.5 top-2.5 text-blue-500" size={14}/>}</div><div className="relative"><input className={`field w-full pr-8 ${autoAnalyzing?"opacity-60":""}`} placeholder={autoAnalyzing?"Đang phân tích...":"Chủ đề"} value={metadata.topic} disabled={autoAnalyzing} onChange={e=>setMetadata(x=>({...x,topic:e.target.value}))}/>{autoAnalyzing&&<LoaderCircle className="animate-spin absolute right-2.5 top-2.5 text-blue-500" size={14}/>}</div><select className="field" value={metadata.doc_type} disabled={autoAnalyzing} onChange={e=>{setDocumentTypeTouched(true);setMetadata(x=>({...x,doc_type:e.target.value}))}}>{DOCUMENT_TYPES.map(type=><option key={type} value={type}>{type}</option>)}</select><select className="field" value={metadata.visibility} onChange={e=>setMetadata(x=>({...x,visibility:e.target.value as "public"|"private"}))}><option value="public">Công khai</option><option value="private">Riêng tư</option></select>{updateCandidate&&<div className="sm:col-span-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900"><strong className="block">Đã có tài liệu cùng tên: v{updateCandidate.current_version}</strong><p className="mt-1">Mặc định file này sẽ trở thành phiên bản v{updateCandidate.current_version+1}. Bản cũ vẫn được giữ để so sánh, tải xuống và backup.</p><label className="mt-3 flex items-center gap-2 font-semibold"><input type="checkbox" checked={uploadAsNew} onChange={e=>setUploadAsNew(e.target.checked)}/>Tạo thành tài liệu mới riêng biệt</label></div>}</div>
 {/* === 2-PANEL DESTINATION PICKER (pre-upload + pending_confirmation) === */}
@@ -571,7 +577,7 @@ export default function Repository() {
           ):(
             <div className="my-2 flex-1 rounded-lg bg-white p-2 text-xs text-gray-500" onClick={e=>e.stopPropagation()}>
               <p className="text-gray-400">AI chưa tìm được vị trí phù hợp.</p>
-              <p className="mt-1 mb-2 text-[10px] text-gray-400">Mô tả tài liệu để AI gợi ý nơi lưu:</p>
+              <p className="mt-1 mb-2 text-xs text-gray-400">Mô tả tài liệu để AI gợi ý nơi lưu:</p>
               <div className="flex gap-1">
                 <input
                   className="field flex-1 text-xs"
@@ -607,9 +613,9 @@ export default function Repository() {
               </div>
             )}
             <div className="border-t pt-2">
-              <p className="mb-1 text-[10px] font-semibold text-gray-500">📁 Yêu cầu tạo thư mục mới</p>
+              <p className="mb-1 text-xs font-semibold text-gray-500">📁 Yêu cầu tạo thư mục mới</p>
               {folderRequestSent?(
-                <p className="rounded-lg bg-green-50 px-2 py-1 text-[10px] text-green-700">✓ Đã gửi yêu cầu tới admin duyệt.</p>
+                <p className="rounded-lg bg-green-50 px-2 py-1 text-xs text-green-700">✓ Đã gửi yêu cầu tới admin duyệt.</p>
               ):(
                 <div className="space-y-1">
                   <input className="field w-full text-xs" placeholder="Tên thư mục mới (VD: Computer Vision)" value={newFolderName} onChange={e=>setNewFolderName(e.target.value)}/>
@@ -625,9 +631,9 @@ export default function Repository() {
       {finalDestination.path&&<p className="mt-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs font-medium text-green-800">📂 Sẽ lưu vào: <span className="font-mono">{finalDestination.path}</span></p>}
     </div>
   );
-})()}{launchedTask&&<div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-3"><div className="flex justify-between text-xs font-bold text-blue-900"><span>{launchedTask.status==="uploading"?"Đang tải lên":launchedTask.status==="uploaded"?"Đã tải file gốc":launchedTask.status==="analyzing"?"Đang AI phân tích":launchedTask.status==="saving_metadata"?"Đang lưu metadata":launchedTask.status==="pending_confirmation"?"Chờ xác nhận phân loại":launchedTask.status==="processing"?"Đang xử lý AI":launchedTask.status==="completed"?"Đã lưu":"Thất bại"}</span><span>{launchedProgress}%</span></div><div className="progress mt-2"><i style={{width:`${launchedProgress}%`}}/></div><p className="muted mt-2 text-[10px]">{formatFileSize(launchedTask.uploaded_bytes)} / {formatFileSize(launchedTask.total_bytes)}</p>{launchedTask.error&&<p className="mt-2 text-xs text-red-600">{launchedTask.error}</p>}</div>}{classificationTicket&&launchedTask?.status==="pending_confirmation"&&(
+})()}{launchedTask&&<div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-3"><div className="flex items-center justify-between gap-2 text-xs font-bold text-blue-900"><span>{launchedTask.status==="uploading"?"Đang tải lên":launchedTask.status==="uploaded"?"Đã tải file gốc":launchedTask.status==="analyzing"?"Đang AI phân tích":launchedTask.status==="saving_metadata"?"Đang lưu metadata":launchedTask.status==="pending_confirmation"?"Chờ xác nhận phân loại":launchedTask.status==="processing"?"Đang xử lý AI":launchedTask.status==="completed"?"Đã lưu":"Thất bại"}</span><span>{launchedProgress}%</span></div><div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full border border-blue-200 bg-white px-2 py-0.5 font-semibold text-blue-700">{launchedSourceLabel}</span>{launchedTask.metadata.source_path&&<span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">Nguồn: {launchedTask.metadata.source_path}</span>}</div><div className="progress mt-2"><i style={{width:`${launchedProgress}%`}}/></div><p className="muted mt-2 text-xs">{formatFileSize(launchedTask.uploaded_bytes)} / {formatFileSize(launchedTask.total_bytes)}</p>{launchedTask.error&&<p className="mt-2 text-xs text-red-600">{launchedTask.error}</p>}</div>}{classificationTicket&&launchedTask?.status==="pending_confirmation"&&(
   <div className="mt-4">
-    <p className="mb-3 text-sm font-semibold text-gray-700">Chọn nơi lưu tài liệu</p>
+    <div className="mb-3 flex items-center justify-between gap-2"><p className="text-sm font-semibold text-gray-700">Chọn nơi lưu tài liệu</p><span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700">{launchedSourceLabel}</span></div>
     <div className="grid grid-cols-2 gap-3">
       {/* Panel trái: AI đề xuất */}
       <div className={`flex flex-col rounded-xl border-2 p-3 transition-all ${destinationSource==="ai"&&classificationTicket.suggested_course_id?"border-blue-500 bg-blue-50":"border-gray-200 bg-gray-50"}`}>
@@ -640,13 +646,13 @@ export default function Repository() {
             <div className="flex items-center gap-1 text-gray-500"><span>🏫</span><span className="font-medium text-gray-700">{classificationTicket.suggested_specialization||"Chuyên ngành"}</span></div>
             <div className="ml-3 flex items-center gap-1 text-gray-500"><span>📚</span><span className="font-medium text-gray-700">{classificationTicket.suggested_course||"Học phần"}</span></div>
             <div className="ml-6 flex items-center gap-1"><span>📄</span><span className="font-semibold text-blue-700">{classificationTicket.suggested_document_type||metadata.doc_type}</span></div>
-            {classificationTicket.confidence<0.65&&<p className="mt-1 rounded bg-amber-50 px-2 py-1 text-[10px] text-amber-700">⚠ Độ tin cậy thấp, nên kiểm tra lại</p>}
+            {classificationTicket.confidence<0.65&&<p className="mt-1 rounded bg-amber-50 px-2 py-1 text-xs text-amber-700">⚠ Độ tin cậy thấp, nên kiểm tra lại</p>}
           </div>
         ):(
           <div className="my-2 flex-1 rounded-lg bg-white p-2 text-xs text-gray-500">
             <p className="text-gray-400">AI chưa tìm được học phần trong cây tri thức.</p>
-            {classificationTicket.suggestions.length>0&&<div className="mt-1 mb-2 space-y-1">{classificationTicket.suggestions.slice(0,2).map(s=><p key={s.course_id} className="text-[10px] text-gray-400">Gợi ý: {s.course} ({Math.round(s.confidence*100)}%)</p>)}</div>}
-            <p className="mb-1 text-[10px] text-gray-400">Mô tả để AI tìm lại nơi lưu:</p>
+            {classificationTicket.suggestions.length>0&&<div className="mt-1 mb-2 space-y-1">{classificationTicket.suggestions.slice(0,2).map(s=><p key={s.course_id} className="text-xs text-gray-400">Gợi ý: {s.course} ({Math.round(s.confidence*100)}%)</p>)}</div>}
+            <p className="mb-1 text-xs text-gray-400">Mô tả để AI tìm lại nơi lưu:</p>
             <div className="flex gap-1" onClick={e=>e.stopPropagation()}>
               <input
                 className="field flex-1 text-xs"
@@ -673,14 +679,14 @@ export default function Repository() {
           <input className="field w-full text-xs" placeholder="Hoặc nhập đường dẫn thủ công..." value={metadata.folder_path} onChange={e=>{selectFolderPath(e.target.value);if(e.target.value)setDestinationSource("manual");}}/>
           {destinationSource==="manual"&&finalDestination.path&&(
             <div className="rounded-lg bg-white p-2 text-xs">
-              <p className="text-[10px] text-gray-400 mb-1">Xem trước đường dẫn:</p>
+              <p className="text-xs text-gray-400 mb-1">Xem trước đường dẫn:</p>
               <p className="font-mono text-blue-700 break-all">{finalDestination.path}</p>
             </div>
           )}
           <div className="border-t pt-2">
-            <p className="mb-1 text-[10px] font-semibold text-gray-500">📁 Yêu cầu tạo thư mục mới</p>
+            <p className="mb-1 text-xs font-semibold text-gray-500">📁 Yêu cầu tạo thư mục mới</p>
             {folderRequestSent?(
-              <p className="rounded-lg bg-green-50 px-2 py-1 text-[10px] text-green-700">✓ Đã gửi yêu cầu tới admin duyệt.</p>
+              <p className="rounded-lg bg-green-50 px-2 py-1 text-xs text-green-700">✓ Đã gửi yêu cầu tới admin duyệt.</p>
             ):(
               <div className="space-y-1">
                 <input className="field w-full text-xs" placeholder="Tên thư mục mới (VD: Computer Vision)" value={newFolderName} onChange={e=>setNewFolderName(e.target.value)}/>
@@ -695,7 +701,7 @@ export default function Repository() {
     </div>
     {finalDestination.path&&<p className="mt-3 rounded-lg bg-green-50 border border-green-200 px-3 py-2 text-xs font-medium text-green-800">📂 Sẽ lưu vào: <span className="font-mono">{finalDestination.path}</span> · <span className="text-green-600">{metadata.visibility==="public"?"Công khai":"Riêng tư"}</span></p>}
   </div>
-)}{launchedTask?.status!=="pending_confirmation"&&<DestinationAssistant messages={destinationChatMessages} input={destinationChatInput} busy={destinationChatBusy} onInput={setDestinationChatInput} onSend={sendDestinationChat}/>}{successMsg&&<p className="mt-3 rounded bg-green-100 border border-green-400 p-3 text-sm font-semibold text-green-800 flex items-center gap-2">✅ {successMsg}</p>}{message&&<p className="mt-3 rounded bg-amber-50 p-2 text-xs text-amber-800">{message}</p>}<p className="muted mt-3 text-[11px]">Bạn có thể đóng cửa sổ hoặc chuyển trang sau khi bắt đầu. Theo dõi tiến trình tại bảng Upload gần đây.</p><div className="mt-5 flex justify-end gap-2">{launchedTask&&!["processing","completed"].includes(launchedTask.status)&&<button className="btn-secondary text-red-600" disabled={startingUpload} onClick={cancelLaunchedUpload}>Hủy upload</button>}<button className="btn-secondary" onClick={()=>setUploadOpen(false)}>Đóng</button><button disabled={!file||file.size>MAX_UPLOAD_BYTES||!metadata.title||(!metadata.topic&&!classificationTicket)||startingUpload||launchedActive||autoAnalyzing} className="btn-primary" onClick={classificationTicket&&launchedTask?.status==="pending_confirmation"?confirmUpload:uploadFile}>{(startingUpload||launchedActive)&&<LoaderCircle className="animate-spin" size={15}/>}{autoAnalyzing&&<LoaderCircle className="animate-spin" size={15}/>} {autoAnalyzing?"AI đang phân tích...":classificationTicket&&launchedTask?.status==="pending_confirmation"?"Xác nhận lưu":launchedActive?"Đang xử lý...":updateCandidate&&!uploadAsNew?`Cập nhật lên v${updateCandidate.current_version+1}`:"Bắt đầu tải lên"}</button></div></Modal>}
+)}{launchedTask?.status!=="pending_confirmation"&&<DestinationAssistant messages={destinationChatMessages} input={destinationChatInput} busy={destinationChatBusy} onInput={setDestinationChatInput} onSend={sendDestinationChat}/>}{successMsg&&<p className="mt-3 rounded bg-green-100 border border-green-400 p-3 text-sm font-semibold text-green-800 flex items-center gap-2">✅ {successMsg}</p>}{message&&<p className="mt-3 rounded bg-amber-50 p-2 text-xs text-amber-800">{message}</p>}<p className="muted mt-3 text-xs">Bạn có thể đóng cửa sổ hoặc chuyển trang sau khi bắt đầu. Theo dõi tiến trình tại bảng Upload gần đây.</p><div className="mt-5 flex justify-end gap-2">{launchedTask&&!["processing","completed"].includes(launchedTask.status)&&<button className="btn-secondary text-red-600" disabled={startingUpload} onClick={cancelLaunchedUpload}>Hủy upload</button>}<button className="btn-secondary" onClick={()=>setUploadOpen(false)}>Đóng</button><button disabled={!file||file.size>MAX_UPLOAD_BYTES||!metadata.title||(!metadata.topic&&!classificationTicket)||startingUpload||launchedActive||autoAnalyzing} className="btn-primary" onClick={classificationTicket&&launchedTask?.status==="pending_confirmation"?confirmUpload:uploadFile}>{(startingUpload||launchedActive)&&<LoaderCircle className="animate-spin" size={15}/>}{autoAnalyzing&&<LoaderCircle className="animate-spin" size={15}/>} {autoAnalyzing?"AI đang phân tích...":classificationTicket&&launchedTask?.status==="pending_confirmation"?"Xác nhận lưu":launchedActive?"Đang xử lý...":updateCandidate&&!uploadAsNew?`Cập nhật lên v${updateCandidate.current_version+1}`:"Bắt đầu tải lên"}</button></div></Modal>}
   </div>;
 }
 
@@ -772,8 +778,8 @@ function FolderNavigation({tree,selectedPath,selectedFileId,onSelectFolder,onOpe
   }
 
   return <div className={collapsed?"p-2":"p-2"}>
-    {!collapsed&&<div className="relative mb-2"><Search className="muted absolute left-3 top-2.5" size={14}/><input className="field pl-9" value={folderQuery} onChange={event=>setFolderQuery(event.target.value)} placeholder="Tìm thư mục..."/></div>}
-    <div ref={treeRef} role="tree" aria-label="Cây thư mục" className={`${collapsed?"max-h-[calc(100vh-160px)] overflow-y-auto overflow-x-hidden":"max-h-[65vh] overflow-auto"} text-[12px]`}>
+    {!collapsed&&<div className="relative mb-2"><Search className="muted absolute left-3 top-2.5" size={14}/><input className="field" style={{ paddingLeft: '36px' }} value={folderQuery} onChange={event=>setFolderQuery(event.target.value)} placeholder="Tìm thư mục..."/></div>}
+    <div ref={treeRef} role="tree" aria-label="Cây thư mục" className={`${collapsed?"max-h-[calc(100vh-160px)] overflow-y-auto overflow-x-hidden":"max-h-[65vh] overflow-auto"} text-sm`}>
       {rows.map((row,index)=>{
         const isFolder=row.type==="folder";
         const isExpanded=isFolder&&(expanded.has(row.path)||!!normalizedQuery);
@@ -786,7 +792,7 @@ function FolderNavigation({tree,selectedPath,selectedFileId,onSelectFolder,onOpe
       })}
       {!rows.length&&<p className="muted p-3 text-xs">Không tìm thấy thư mục.</p>}
     </div>
-    {!collapsed&&<p className="muted mt-2 border-t border-[var(--border)] px-2 pt-2 text-[10px]">Dùng phím mũi tên để điều hướng, Enter để mở.</p>}
+    {!collapsed&&<p className="muted mt-2 border-t border-[var(--border)] px-2 pt-2 text-xs">Dùng phím mũi tên để điều hướng, Enter để mở.</p>}
   </div>;
 }
 
@@ -836,7 +842,7 @@ function flattenFolderNodes(nodes:FolderNode[],depth=0):Array<FolderNode&{depth:
 function FolderNodePicker({options,value,onChange}:{options:Array<FolderNode&{depth:number}>;value:string;onChange:(option:(FolderNode&{depth:number})|undefined)=>void}){
   return <div className="sm:col-span-2 rounded-xl border border-blue-200 bg-blue-50 p-3">
     <strong className="block text-xs text-blue-900">Chọn nhánh trong cây tri thức chuẩn</strong>
-    <p className="muted mt-1 text-[10px]">Giảng viên chỉ thấy và tải lên vào các nhánh thuộc nhóm chuyên môn đã chọn.</p>
+    <p className="muted mt-1 text-xs">Giảng viên chỉ thấy và tải lên vào các nhánh thuộc nhóm chuyên môn đã chọn.</p>
     <select className="field mt-3" value={value} onChange={event=>onChange(options.find(item=>item.id===event.target.value))}>
       <option value="">Chọn nhánh được phép tải lên</option>
       {options.map(option=><option key={option.id} value={option.id}>{"--".repeat(option.depth)} {option.path}</option>)}
@@ -860,11 +866,11 @@ function FolderPicker({tree,value,onChange}:{tree:FolderTree;value:string;onChan
 
   return <div className="sm:col-span-2 rounded-xl border border-[var(--border)] bg-[var(--soft)] p-3">
     <div className="flex items-center justify-between gap-3">
-      <div><strong className="block text-xs">Chọn thư mục có sẵn</strong><span className="muted text-[10px]">Chọn thư mục cha để hiện các thư mục con.</span></div>
-      {value&&<button type="button" className="text-[11px] font-bold text-blue-600" onClick={()=>onChange("")}>Bỏ chọn</button>}
+      <div><strong className="block text-xs">Chọn thư mục có sẵn</strong><span className="muted text-xs">Chọn thư mục cha để hiện các thư mục con.</span></div>
+      {value&&<button type="button" className="text-xs font-bold text-blue-600" onClick={()=>onChange("")}>Bỏ chọn</button>}
     </div>
     {levels.length?<div className="mt-3 grid gap-2 sm:grid-cols-2">{levels.map((level,depth)=><select key={depth} className="field" value={level.selected} onChange={e=>onChange([...selected.slice(0,depth),e.target.value].filter(Boolean).join("/"))}><option value="">Chọn thư mục cấp {depth+1}</option>{level.options.map(name=><option key={name} value={name}>{name}</option>)}</select>)}</div>:<p className="muted mt-3 text-xs">Chưa có thư mục cũ để lựa chọn.</p>}
-    {value&&<p className="mt-2 break-all text-[11px]"><span className="muted">Đường dẫn đã chọn: </span><strong>{value}</strong></p>}
+    {value&&<p className="mt-2 break-all text-xs"><span className="muted">Đường dẫn đã chọn: </span><strong>{value}</strong></p>}
   </div>;
 }
 
@@ -878,7 +884,7 @@ function DestinationAssistant({messages,input,busy,onInput,onSend}:{messages:Des
       <Bot size={17} className="mt-0.5 shrink-0 text-blue-600"/>
       <div>
         <strong className="block text-sm">Trợ lý chọn nơi lưu</strong>
-        <p className="muted mt-1 text-[10px]">Chỉ chọn học phần/folder trong nhánh được phép. Yêu cầu tạo ngành/học phần mới sẽ gửi admin duyệt.</p>
+        <p className="muted mt-1 text-xs">Chỉ chọn học phần/folder trong nhánh được phép. Yêu cầu tạo ngành/học phần mới sẽ gửi admin duyệt.</p>
       </div>
     </div>
     <div className="max-h-56 space-y-2 overflow-auto p-3 text-xs">
@@ -892,7 +898,7 @@ function DestinationAssistant({messages,input,busy,onInput,onSend}:{messages:Des
         <textarea className="field min-h-16 flex-1 text-xs" value={input} onChange={event=>onInput(event.target.value)} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();if(input.trim()&&!busy)onSend();}}} placeholder="Ví dụ: lưu vào NLP / Bài giảng, hoặc yêu cầu admin thêm học phần mới..."/>
         <button className="icon-btn h-10 w-10 shrink-0" disabled={busy||!input.trim()} onClick={onSend} title="Gửi yêu cầu"><Send size={15}/></button>
       </div>
-      <p className="muted mt-2 text-[10px]">{busy?"Đang gửi yêu cầu...":"Enter để gửi, Shift + Enter để xuống dòng"}</p>
+      <p className="muted mt-2 text-xs">{busy?"Đang gửi yêu cầu...":"Enter để gửi, Shift + Enter để xuống dòng"}</p>
     </div>
   </div>;
 }
@@ -925,13 +931,13 @@ function SaveLocationPreview({path,source,badge,title,topic,docType,visibility,o
       <strong className="text-sm">Nơi lưu & Chỉ mục RAG</strong>
       <span className={`badge ${source==="manual"?"badge-green":"badge-amber"}`}>{badge}</span>
     </div>
-    <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 font-mono text-[11px] space-y-1">
+    <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 font-mono text-xs space-y-1">
       <div className="flex items-center gap-1.5 text-slate-500"><FolderOpen size={13} className="text-amber-400 shrink-0"/><span>Kho tri thức</span></div>
       {path?segments.map((seg,i)=>(
         <div key={i} className="flex items-center gap-1" style={{paddingLeft:`${(i+1)*14}px`}}>
           <span className="text-slate-300 select-none">└─</span>
           {editingSegment===i
-            ?<input autoFocus className="field py-0.5 px-1.5 text-[11px] h-auto w-40 font-sans" value={segmentDraft}
+            ?<input autoFocus className="field py-0.5 px-1.5 text-xs h-auto w-40 font-sans" value={segmentDraft}
                 onChange={e=>setSegmentDraft(e.target.value)} onBlur={()=>commitEdit(i)} onKeyDown={e=>handleKey(e,i)}/>
             :<><Folder size={12} className="text-amber-400 shrink-0"/>
               <span className="text-slate-700 font-semibold truncate max-w-[200px]" title={seg}>{seg}</span>
@@ -942,11 +948,11 @@ function SaveLocationPreview({path,source,badge,title,topic,docType,visibility,o
         <span className="text-slate-300 select-none">└─</span>
         <File size={12} className="text-blue-400 shrink-0"/>
         <span className="font-semibold text-blue-700 truncate max-w-[220px]" title={title}>{title}</span>
-        <span className={`ml-1 badge text-[9px] ${visibility==="public"?"badge-green":"badge-amber"}`}>{visibility==="public"?"Công khai":"Riêng tư"}</span>
+        <span className={`ml-1 badge text-xs ${visibility==="public"?"badge-green":"badge-amber"}`}>{visibility==="public"?"Công khai":"Riêng tư"}</span>
       </div>}
     </div>
-    {path&&<p className="mt-1.5 text-[10px] text-slate-400 flex items-center gap-1"><Pencil size={9}/>Nhấp vào tên thư mục để đổi tên trước khi lưu</p>}
-    <div className="mt-3 border-t border-slate-100 pt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+    {path&&<p className="mt-1.5 text-xs text-slate-400 flex items-center gap-1"><Pencil size={9}/>Nhấp vào tên thư mục để đổi tên trước khi lưu</p>}
+    <div className="mt-3 border-t border-slate-100 pt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
       <span className="text-slate-400">Tiêu đề</span><strong className="truncate">{title||"—"}</strong>
       <span className="text-slate-400">Chủ đề</span><span className="truncate">{topic||"—"}</span>
       <span className="text-slate-400">Loại tài liệu</span><span>{docType||"—"}</span>

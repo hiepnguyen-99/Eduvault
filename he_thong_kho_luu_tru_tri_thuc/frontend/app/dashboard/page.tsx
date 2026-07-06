@@ -2,18 +2,25 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Activity, BookOpen, Boxes, Database, FileText, GraduationCap, ServerCog, Upload, Users, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
+import { Activity, BookOpen, Boxes, CheckCircle2, Clock3, Database, FileText, FolderSync, GraduationCap, ServerCog, Upload, Users, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 import { DashboardData, formatDate, V2Status } from "@/lib/api";
 import { useBackendData } from "@/lib/hooks";
 import { Bars, Metric, PageHeader, Panel } from "@/components/ui";
+import { UploadTask } from "@/components/upload-task-provider";
 
 const empty: DashboardData = { user: { code:"",name:"",role:"lecturer",department:"",permissions:[] }, stats:{documents:0,private:0,topics:0}, documents:[], requests:[], backups:[], audit:[] };
 const emptyV2: V2Status = { architecture:"v2-hybrid",database:"",ready:false,scope:"single-faculty",capacity_target_gb:100,rpo_target_minutes:60,rto_target_hours:4,services:{},objects:[],outbox:[] };
+const emptyTasks: UploadTask[] = [];
 
 export default function Dashboard() {
   const { data, loading, error } = useBackendData("/api/dashboard", empty);
   const { data:v2 } = useBackendData("/api/v2/status", emptyV2);
+  const { data: uploadTasks } = useBackendData("/api/uploads", emptyTasks);
   const [showDetails, setShowDetails] = useState(false);
+  const desktopTasks = uploadTasks.filter(task => task.metadata.source_type === "desktop_agent");
+  const desktopPending = desktopTasks.filter(task => task.status === "pending_confirmation").length;
+  const desktopCompleted = desktopTasks.filter(task => task.status === "completed").length;
+  const desktopActive = desktopTasks.filter(task => !["completed", "failed"].includes(task.status)).length;
 
   return (
     <div className="space-y-6">
@@ -52,11 +59,11 @@ export default function Dashboard() {
                 {data.documents.slice(0, 5).map(d => (
                   <tr key={d.id}>
                     <td>
-                      <strong className="text-gray-800 font-bold block">{d.title}</strong>
-                      <span className="muted block text-[11px] mt-0.5">{d.topic} · {d.doc_type}</span>
+                      <strong className="text-slate-900 dark:text-slate-100 font-bold block">{d.title}</strong>
+                      <span className="muted block text-xs mt-0.5">{d.topic} · {d.doc_type}</span>
                     </td>
-                    <td className="text-gray-600 text-xs">{d.owner_code}</td>
-                    <td className="text-gray-600 text-xs">v{d.current_version}</td>
+                    <td className="text-slate-600 dark:text-slate-300 text-sm">{d.owner_code}</td>
+                    <td className="text-slate-600 dark:text-slate-300 text-sm">v{d.current_version}</td>
                     <td>
                       <span className={`badge ${d.visibility === "public" ? "badge-green" : "badge-amber"}`}>
                         {d.visibility}
@@ -76,6 +83,40 @@ export default function Dashboard() {
 
         {/* Right: Quick shortcuts */}
         <div className="space-y-6">
+          <Panel title="Luồng tự động từ Desktop Agent" description="Theo dõi nhanh file đang được đồng bộ từ máy cá nhân lên hệ thống.">
+            <div className="space-y-4 p-4">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-2xl border border-blue-100 dark:border-blue-900 bg-blue-50/80 dark:bg-blue-900/30 p-3">
+                  <div className="flex items-center gap-2 text-blue-700 dark:text-blue-400">
+                    <FolderSync size={15} />
+                    <span className="text-[11px] font-semibold">Đang chạy</span>
+                  </div>
+                  <strong className="mt-2 block text-2xl font-black text-[#102451] dark:text-blue-50">{desktopActive}</strong>
+                </div>
+                <div className="rounded-2xl border border-amber-100 dark:border-amber-900/60 bg-amber-50/90 dark:bg-amber-900/20 p-3">
+                  <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                    <Clock3 size={15} />
+                    <span className="text-[11px] font-semibold">Chờ xác nhận</span>
+                  </div>
+                  <strong className="mt-2 block text-2xl font-black text-[#102451] dark:text-amber-50">{desktopPending}</strong>
+                </div>
+                <div className="rounded-2xl border border-emerald-100 dark:border-emerald-900/60 bg-emerald-50/90 dark:bg-emerald-900/20 p-3">
+                  <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
+                    <CheckCircle2 size={15} />
+                    <span className="text-[11px] font-semibold">Hoàn tất</span>
+                  </div>
+                  <strong className="mt-2 block text-2xl font-black text-[#102451] dark:text-emerald-50">{desktopCompleted}</strong>
+                </div>
+              </div>
+              <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--soft)] p-4 text-xs text-slate-600 dark:text-slate-400">
+                Desktop Agent giúp kéo file từ thư mục làm việc trên máy tính lên kho tri thức, tự gắn metadata AI và đưa về bước xác nhận cuối cùng trên web.
+              </div>
+              <Link href="/auto-ingestion" className="btn-secondary w-full justify-center text-xs">
+                <FolderSync size={14} />
+                Mở trung tâm nhập liệu tự động
+              </Link>
+            </div>
+          </Panel>
           <Panel title="Liên kết nhanh" description="Truy cập nhanh các chức năng chính.">
             <div className="p-4 space-y-3">
               <Link href="/assistant" className="flex items-center gap-3 p-3 rounded-xl hover:bg-[var(--soft)] border border-transparent hover:border-[var(--border)] transition-all duration-200">
@@ -83,8 +124,8 @@ export default function Dashboard() {
                   <Sparkles size={16} />
                 </div>
                 <div className="text-left">
-                  <strong className="text-xs text-gray-800 block">Hỏi đáp với Trợ lý AI</strong>
-                  <span className="text-[11px] text-gray-500 block">Tra cứu tri thức học thuật tức thì</span>
+                  <strong className="text-xs text-slate-900 dark:text-slate-100 block">Hỏi đáp với Trợ lý AI</strong>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">Tra cứu tri thức học thuật tức thì</span>
                 </div>
               </Link>
 
@@ -93,8 +134,8 @@ export default function Dashboard() {
                   <GraduationCap size={16} />
                 </div>
                 <div className="text-left">
-                  <strong className="text-xs text-gray-800 block">Chuyển giao tri thức</strong>
-                  <span className="text-[11px] text-gray-500 block">Quy trình bàn giao học phần giảng dạy</span>
+                  <strong className="text-xs text-slate-900 dark:text-slate-100 block">Chuyển giao tri thức</strong>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block">Quy trình bàn giao học phần giảng dạy</span>
                 </div>
               </Link>
             </div>
@@ -109,7 +150,7 @@ export default function Dashboard() {
               ].map(x => (
                 <div key={x[0]} className="flex justify-between border-b border-[var(--border)] pb-2">
                   <span className="muted">{x[0]}</span>
-                  <strong className="text-gray-800 font-bold">{x[1]}</strong>
+                  <strong className="text-slate-900 dark:text-slate-100 font-bold">{x[1]}</strong>
                 </div>
               ))}
             </div>

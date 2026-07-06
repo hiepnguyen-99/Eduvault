@@ -1,7 +1,7 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
-import { CheckCircle2, LoaderCircle, Pencil, ShieldCheck, UserCheck, UserPlus, Users, X } from "lucide-react";
+import { CheckCircle2, FileUp, LoaderCircle, Pencil, Search, ShieldCheck, UserCheck, UserPlus, Users, X } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { useBackendData } from "@/lib/hooks";
 import { PageHeader, Panel } from "@/components/ui";
@@ -19,7 +19,36 @@ type ProfileUpdateRequest = {
   current_department: string;
 };
 
-const roleLabels: Record<string, string> = { lecturer: "Giảng viên", new_lecturer: "Giảng viên mới", head: "Trưởng bộ môn", admin: "Quản trị viên" };
+type UserImportPreviewRow = {
+  row: number;
+  code: string;
+  name: string;
+  role: string;
+  department: string;
+  password: string;
+  active: number;
+  action: "create" | "update";
+  status: "valid" | "error";
+  errors: string[];
+  warnings: string[];
+  exists: boolean;
+  current?: { code: string; name: string; role: string; department: string; active: number } | null;
+};
+
+type UserImportPreview = {
+  status: "validated" | "has_errors";
+  summary: {
+    total_rows: number;
+    valid_rows: number;
+    error_rows: number;
+    warning_rows: number;
+    create_rows: number;
+    update_rows: number;
+  };
+  rows: UserImportPreviewRow[];
+};
+
+const roleLabels: Record<string, string> = { lecturer: "Giảng viên", new_lecturer: "Giảng viên moi", head: "Trưởng bộ môn", admin: "Quản trị viên" };
 const roleBadge: Record<string, string> = { lecturer: "badge-green", new_lecturer: "badge-amber", head: "badge-blue", admin: "badge-red" };
 
 function randomCode(name: string) {
@@ -61,7 +90,7 @@ function CreateUserModal({ onClose, onDone }: { onClose: () => void; onDone: () 
     <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4" onClick={onClose}>
       <div className="app-card w-full max-w-md" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-4">
-          <div><p className="eyebrow">Tao moi</p><h2 className="mt-0.5 text-sm font-bold">Them tai khoan</h2></div>
+          <div><p className="eyebrow">Tạo mới</p><h2 className="mt-0.5 text-sm font-bold">Thêm tài khoản</h2></div>
           <button onClick={onClose} className="icon-btn"><X size={16}/></button>
         </div>
         <form className="p-5 space-y-3" onSubmit={submit}>
@@ -83,7 +112,7 @@ function CreateUserModal({ onClose, onDone }: { onClose: () => void; onDone: () 
           <label className="block text-xs font-bold">Vai trò
             <select className="field mt-1" value={form.role} onChange={e => set("role", e.target.value)}>
               <option value="lecturer">Giảng viên</option>
-              <option value="new_lecturer">Giảng viên mới</option>
+              <option value="new_lecturer">Giảng viên moi</option>
               <option value="head">Trưởng bộ môn</option>
               <option value="admin">Quản trị viên</option>
             </select>
@@ -142,7 +171,7 @@ function EditUserModal({ userRow, onClose, onDone }: { userRow: User; onClose: (
           <label className="block text-xs font-bold">Vai trò
             <select className="field mt-1" value={form.role} onChange={e => set("role", e.target.value)}>
               <option value="lecturer">Giảng viên</option>
-              <option value="new_lecturer">Giảng viên mới</option>
+              <option value="new_lecturer">Giảng viên moi</option>
               <option value="head">Trưởng bộ môn</option>
               <option value="admin">Quản trị viên</option>
             </select>
@@ -171,6 +200,9 @@ export default function UsersPage() {
   const [editing, setEditing] = useState<User | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [message, setMessage] = useState("");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<UserImportPreview | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
 
   if (user?.role !== "admin") {
     return <div className="p-10 text-center"><ShieldCheck className="mx-auto mb-3 text-[var(--muted)]" size={40}/><p className="font-bold">Chỉ quản trị viên mới có quyền truy cập trang này.</p></div>;
@@ -207,6 +239,46 @@ export default function UsersPage() {
     reloadUsers();
   }
 
+  async function previewImport() {
+    if (!importFile) return;
+    setImportBusy(true);
+    setMessage("");
+    try {
+      const result = await request<UserImportPreview>("/api/admin/users/import/preview", {
+        method: "POST",
+        headers: { "X-Filename": importFile.name, "Content-Type": importFile.type || "text/csv" },
+        body: await importFile.arrayBuffer(),
+      });
+      setImportPreview(result);
+      setMessage(result.status === "validated" ? "CSV hợp lệ, bạn có thể xác nhận import." : "CSV còn lỗi, vui lòng kiểm tra preview.");
+    } catch (err) {
+      setImportPreview(null);
+      setMessage(err instanceof Error ? err.message : "Không preview được file CSV người dùng.");
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  async function confirmImport() {
+    if (!importPreview) return;
+    setImportBusy(true);
+    setMessage("");
+    try {
+      const result = await request<{ created: number; updated: number; reactivated: number; processed: number }>("/api/admin/users/import/confirm", {
+        method: "POST",
+        body: JSON.stringify({ rows: importPreview.rows }),
+      });
+      setMessage(`Đã import ${result.processed} tài khoản: tạo mới ${result.created}, cập nhật ${result.updated}, mở lại ${result.reactivated}.`);
+      setImportPreview(null);
+      setImportFile(null);
+      reloadUsers();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Không confirm được import người dùng.");
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
   const pendingProfileRequests = profileRequests.filter(item => item.status === "pending");
 
   return (
@@ -233,8 +305,8 @@ export default function UsersPage() {
                   <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
                     <span className="muted">Tên hiện tại:</span><span>{req.current_name}</span>
                     <span className="muted">Tên mới:</span><strong>{req.new_name}</strong>
-                    <span className="muted">Bộ môn hiện tại:</span><span>{req.current_department}</span>
-                    <span className="muted">Bộ môn mới:</span><strong>{req.new_department}</strong>
+                    <span className="muted">Bộ môn hien tai:</span><span>{req.current_department}</span>
+                    <span className="muted">Bộ môn moi:</span><strong>{req.new_department}</strong>
                   </div>
                   <p className="muted mt-1">Lý do: {req.reason}</p>
                 </div>
@@ -247,6 +319,62 @@ export default function UsersPage() {
           </div>
         </Panel>
       )}
+
+      <div className="mb-5 grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
+        <Panel title="Import CSV người dùng" description="Tạo mới hoặc cập nhật hàng loạt tài khoản từ file CSV.">
+          <div className="space-y-4 p-4">
+            <label className="block rounded-xl border-2 border-dashed border-blue-300 p-6 text-center">
+              <FileUp className="mx-auto text-blue-600" size={24}/>
+              <strong className="mt-3 block text-sm">{importFile?.name || "Chọn file CSV người dùng"}</strong>
+              <span className="muted mt-1 block text-xs">Cột gợi ý: code, name, role, department, password, active</span>
+              <input className="hidden" type="file" accept=".csv" onChange={event => setImportFile(event.target.files?.[0] || null)} />
+            </label>
+            <button className="btn-primary w-full" disabled={!importFile || importBusy} onClick={previewImport}>
+              {importBusy ? <LoaderCircle className="animate-spin" size={15}/> : <Search size={15}/>}Preview CSV
+            </button>
+            <button className="btn-secondary w-full" disabled={!importPreview || importPreview.summary.error_rows > 0 || importBusy} onClick={confirmImport}>
+              <CheckCircle2 size={15}/>Xác nhận import
+            </button>
+          </div>
+        </Panel>
+
+        <Panel title="Preview import" description="Kiểm tra lỗi và các tài khoản sẽ được tạo/cập nhật trước khi xác nhận.">
+          <div className="p-4">
+            {!importPreview ? (
+              <p className="muted text-xs">Chưa có preview. Hãy chọn file CSV rồi bấm Preview.</p>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+                  <MiniMetric label="Total" value={importPreview.summary.total_rows} />
+                  <MiniMetric label="Valid" value={importPreview.summary.valid_rows} />
+                  <MiniMetric label="Errors" value={importPreview.summary.error_rows} />
+                  <MiniMetric label="Warnings" value={importPreview.summary.warning_rows} />
+                  <MiniMetric label="Create" value={importPreview.summary.create_rows} />
+                  <MiniMetric label="Update" value={importPreview.summary.update_rows} />
+                </div>
+                <div className="table-shell">
+                  <table className="data-table">
+                    <thead><tr><th>Row</th><th>Mã</th><th>Họ tên</th><th>Vai trò</th><th>Hành động</th><th>Trạng thái</th><th>Ghi chú</th></tr></thead>
+                    <tbody>
+                      {importPreview.rows.map(item => (
+                        <tr key={`${item.row}-${item.code}`}>
+                          <td>{item.row}</td>
+                          <td><strong className="font-mono text-xs">{item.code}</strong></td>
+                          <td>{item.name}<span className="muted block text-[10px]">{item.department}</span></td>
+                          <td><span className={`badge ${roleBadge[item.role] || "badge-gray"}`}>{roleLabels[item.role] || item.role}</span></td>
+                          <td><span className={`badge ${item.action === "create" ? "badge-green" : "badge-blue"}`}>{item.action === "create" ? "Tạo mới" : "Cập nhật"}</span></td>
+                          <td><span className={`badge ${item.status === "valid" ? "badge-green" : "badge-red"}`}>{item.status === "valid" ? "Hợp lệ" : "Lỗi"}</span></td>
+                          <td className="text-xs">{[...item.errors, ...item.warnings].join("; ") || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </Panel>
+      </div>
 
       <Panel title={`Tài khoản hệ thống (${users.length})`}>
         <div className="table-shell">
@@ -284,11 +412,20 @@ export default function UsersPage() {
       </Panel>
 
       {showCreate && (
-        <CreateUserModal onClose={() => setShowCreate(false)} onDone={() => { setShowCreate(false); setMessage("Tạo tài khoản thành công."); reloadUsers(); }}/>
+        <CreateUserModal onClose={() => setShowCreate(false)} onDone={() => { setShowCreate(false); setMessage("Tạo tài khoản thanh cong."); reloadUsers(); }}/>
       )}
       {editing && (
         <EditUserModal userRow={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); setMessage("Đã cập nhật tài khoản."); reloadUsers(); }}/>
       )}
+    </div>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-2xl border border-[var(--border)] bg-[var(--panel)] px-3 py-3 shadow-sm">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--muted)]">{label}</p>
+      <p className="mt-1 text-lg font-bold text-[var(--text)]">{value}</p>
     </div>
   );
 }

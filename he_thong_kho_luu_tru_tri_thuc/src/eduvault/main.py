@@ -1,26 +1,57 @@
 from __future__ import annotations
 
 import secrets
-import html
 import os
 import difflib
 import json
 import re
+import unicodedata
+import zipfile
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from typing import Literal
+from urllib.parse import quote
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import ClientDisconnect
 
 from .ai import ai_provider
-from .cloud import PROVIDERS, authorization_url, disconnect, exchange_code, list_connections, sync_user_document
-from .database import DATA_DIR, ROOT, connection, database_backend, hash_secret, init_database, now, rows, transaction
+from .cloud import sync_user_document
+from .cloud_router import build_cloud_router
+from .classification_service import analyze_upload_task, classification_ticket_public, create_classification_ticket
+from .database import (
+    DATA_DIR,
+    ROOT,
+    connection,
+    database_backend,
+    hash_password,
+    hash_secret,
+    init_database,
+    now,
+    password_needs_rehash,
+    rows,
+    transaction,
+    verify_password,
+)
+from .desktop_router import build_desktop_router
+from .ingestion_service import (
+    append_upload_chunk,
+    create_upload_task,
+    delete_upload_task as delete_ingestion_task,
+    force_source_type,
+    get_upload_task_public,
+    get_upload_task_row,
+    list_upload_tasks as list_ingestion_tasks,
+    upload_task_public,
+)
 from .infrastructure import infrastructure_status
+from .repository_commit_service import confirm_upload_task, process_document_background_task
 from .services import (
     anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup, delete_policy_file,
     DOCUMENT_TYPES, active_course_suggestions, active_policy, apply_due_time_based_permission_rules, apply_policy_action, create_document, create_policy_action_request, create_policy_file, enqueue_processing_jobs, expire_time_based_permission_rule, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
@@ -30,8 +61,9 @@ from .services import (
     build_lecturer_folder_tree, profile_specializations, public_specializations, quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
     extraction_placeholder, global_knowledge_search, list_audit_logs, meaningful_text_score, qdrant_reindex_status, quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
     activate_policy_file, preview_policy_activation, preview_policy_action, rollback_policy_action, set_user_specializations, validate_folder_access,
-    confirm_lecturer_assignment_batch, lecturer_assignment_batch_detail, list_lecturer_assignments, my_assignment, preview_lecturer_assignment_import,
+    confirm_lecturer_assignment_batch, confirm_user_import, lecturer_assignment_batch_detail, list_lecturer_assignments, my_assignment, preview_lecturer_assignment_import, preview_user_import,
     backup_record_with_manifest, operations_status, record_automation_heartbeat, verify_restore_backup,
+    desktop_agent_status, desktop_agent_sync_config, list_desktop_sync_folders, replace_desktop_sync_folders, upsert_desktop_agent_device,
 )
 
 
@@ -48,9 +80,10 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="EduVault API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="EduVault API", version="4.0.0", lifespan=lifespan)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 MAX_AI_ANALYZE_BYTES = int(os.getenv("MAX_AI_ANALYZE_MB", "25")) * 1024 * 1024
+SESSION_COOKIE_NAME = "eduvault_session"
 
 
 REQUIRED_SECURITY_ENV = (
@@ -75,12 +108,9 @@ INSECURE_SECRET_VALUES = {
 def _required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        fallbacks = {
-            "N8N_POLICY_SECRET": "default-n8n-policy-secret-key-for-dev-2026",
-            "TOKEN_ENCRYPTION_KEY": "default-token-encryption-key-for-dev-2026",
-            "SESSION_TTL_MINUTES": "480"
-        }
-        value = fallbacks.get(name, "default-fallback-value-2026")
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    if value in INSECURE_SECRET_VALUES:
+        raise RuntimeError(f"Insecure demo value is not allowed for environment variable: {name}")
     return value
 
 
@@ -99,12 +129,50 @@ def validate_security_config() -> None:
     if os.getenv("MINIO_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
         _required_env("MINIO_ACCESS_KEY")
         _required_env("MINIO_SECRET_KEY")
+
+
+def allowed_origins() -> list[str]:
+    configured = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if configured:
+        return [item.strip().rstrip("/") for item in configured.split(",") if item.strip()]
+    return [
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    ]
+
+
+def session_cookie_secure() -> bool:
+    return os.getenv("SESSION_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=session_cookie_secure(),
+        samesite="lax",
+        max_age=int(_required_env("SESSION_TTL_MINUTES")) * 60,
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        httponly=True,
+        secure=session_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",
-    allow_credentials=True,
+    allow_origins=allowed_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 
@@ -141,6 +209,158 @@ class SearchFeedbackInput(BaseModel):
     detail: str = ""
 
 
+class BatchDownloadInput(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=50)
+    zip_name: str | None = Field(default=None, max_length=180)
+
+
+class TransferInput(BaseModel):
+    course_code: str
+    from_code: str
+    to_code: str
+    deadline: str
+
+
+class ProgressInput(BaseModel):
+    progress: int = Field(ge=0, le=100)
+
+
+class ExamPublicationInput(BaseModel):
+    publish_after: str = Field(min_length=10, max_length=40)
+
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
+MAX_AI_ANALYZE_BYTES = int(os.getenv("MAX_AI_ANALYZE_MB", "25")) * 1024 * 1024
+SESSION_COOKIE_NAME = "eduvault_session"
+
+
+REQUIRED_SECURITY_ENV = (
+    "N8N_POLICY_SECRET",
+    "TOKEN_ENCRYPTION_KEY",
+    "SESSION_TTL_MINUTES",
+)
+
+INSECURE_SECRET_VALUES = {
+    "dev-policy-secret",
+    "eduvault-demo-key-change-before-production",
+    "change-me",
+    "change-root-me",
+    "eduvault-demo-secret",
+    "ADMIN",
+    "GV001",
+    "GVNEW",
+    "TBM01",
+}
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    if value in INSECURE_SECRET_VALUES:
+        raise RuntimeError(f"Insecure demo value is not allowed for environment variable: {name}")
+    return value
+
+
+def validate_security_config() -> None:
+    for name in REQUIRED_SECURITY_ENV:
+        _required_env(name)
+    ttl_raw = _required_env("SESSION_TTL_MINUTES")
+    try:
+        ttl = int(ttl_raw)
+    except ValueError as exc:
+        raise RuntimeError("SESSION_TTL_MINUTES must be an integer.") from exc
+    if ttl <= 0:
+        raise RuntimeError("SESSION_TTL_MINUTES must be greater than zero.")
+    if os.getenv("DATABASE_PROVIDER", "sqlite").strip().lower() == "mysql":
+        _required_env("MYSQL_PASSWORD")
+    if os.getenv("MINIO_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        _required_env("MINIO_ACCESS_KEY")
+        _required_env("MINIO_SECRET_KEY")
+
+
+def allowed_origins() -> list[str]:
+    configured = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if configured:
+        return [item.strip().rstrip("/") for item in configured.split(",") if item.strip()]
+    return [
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    ]
+
+
+def session_cookie_secure() -> bool:
+    return os.getenv("SESSION_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=session_cookie_secure(),
+        samesite="lax",
+        max_age=int(_required_env("SESSION_TTL_MINUTES")) * 60,
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        httponly=True,
+        secure=session_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins(),
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
+
+
+class Login(BaseModel):
+    code: str
+    password: str
+
+
+class DocumentInput(BaseModel):
+    title: str = Field(min_length=2, max_length=200)
+    doc_type: str = Field(min_length=2, max_length=80)
+    topic: str = Field(min_length=2, max_length=120)
+    visibility: Literal["public", "private"]
+    content: str = Field(min_length=1)
+    folder_path: str | None = None
+    folder_node_id: str | None = None
+
+
+class AnalyzeInput(BaseModel):
+    filename: str
+    content: str
+
+
+class Question(BaseModel):
+    question: str = Field(min_length=2, max_length=1000)
+    filters: dict | None = None
+    current_page: str | None = None
+
+
+class SearchFeedbackInput(BaseModel):
+    trace_id: str
+    rating: str
+    reason: str = ""
+    detail: str = ""
+
+
+class BatchDownloadInput(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=50)
+    zip_name: str | None = Field(default=None, max_length=180)
+
+
 class TransferInput(BaseModel):
     course_code: str
     from_code: str
@@ -162,12 +382,14 @@ class PolicyInput(BaseModel):
 
 class PolicyAssistantInput(BaseModel):
     message: str = Field(min_length=2, max_length=1000)
+    history: list[dict] = Field(default_factory=list)
 
 
 class PolicyAssistantConfirmInput(BaseModel):
-    message: str = Field(min_length=2, max_length=1000)
-    action: dict
-    preview: dict
+    request_id: str | None = None
+    message: str | None = Field(default=None, max_length=1000)
+    action: dict | None = None
+    preview: dict | None = None
     apply_now: bool = False
 
 
@@ -206,6 +428,24 @@ class UserUpdate(BaseModel):
     active: bool = True
 
 
+class UserImportRowInput(BaseModel):
+    row: int | None = None
+    code: str = Field(min_length=3, max_length=30)
+    name: str = Field(min_length=2, max_length=120)
+    role: Literal["lecturer", "new_lecturer", "head", "admin"]
+    department: str = Field(min_length=2, max_length=120)
+    password: str = Field(default="", max_length=200)
+    active: int = 1
+    action: Literal["create", "update"] | None = None
+    status: Literal["valid", "error"] = "valid"
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class UserImportConfirmInput(BaseModel):
+    rows: list[UserImportRowInput] = Field(default_factory=list)
+
+
 class StorageInput(BaseModel):
     name: str
     provider: Literal["local", "google_drive", "onedrive", "sharepoint"]
@@ -239,6 +479,11 @@ class UploadInitInput(BaseModel):
     folder_path: str | None = None
     folder_node_id: str | None = None
     existing_document_id: str | None = None
+    source_type: Literal["web", "desktop_agent", "cloud_sync", "api_import"] = "web"
+    source_path: str | None = None
+    device_id: str | None = None
+    source_sha256: str | None = None
+    observed_at: str | None = None
 
 
 class UploadConfirmInput(BaseModel):
@@ -251,6 +496,27 @@ class UploadConfirmInput(BaseModel):
     final_destination_source: Literal["manual", "ai"] | None = None
 
 
+class DesktopSyncFolderItem(BaseModel):
+    folder_path: str = Field(min_length=1, max_length=1000)
+    folder_label: str = Field(default="", max_length=255)
+    enabled: bool = True
+
+
+class DesktopSyncFoldersInput(BaseModel):
+    folders: list[DesktopSyncFolderItem] = Field(default_factory=list)
+
+
+class DesktopAgentHeartbeatInput(BaseModel):
+    device_id: str = Field(min_length=2, max_length=120)
+    app_version: str = Field(default="1.0.0", min_length=1, max_length=40)
+    status: Literal["online", "offline", "error"] = "online"
+    connection_status: str = Field(default="Connected", min_length=2, max_length=80)
+    watch_folders: list[str] = Field(default_factory=list)
+    last_sync_at: str | None = Field(default=None, max_length=80)
+    last_seen_at: str | None = Field(default=None, max_length=80)
+    last_error: str = Field(default="", max_length=500)
+
+
 class SpecializationSelection(BaseModel):
     specialization_ids: list[str] = Field(default_factory=list)
 
@@ -260,8 +526,8 @@ class LecturerAssignmentConfirmInput(BaseModel):
     apply_mode: Literal["replace_for_listed_lecturers", "append", "replace_all"] = "replace_for_listed_lecturers"
 
 
-def current_user(authorization: str = Header(default="")) -> dict:
-    token = authorization.removeprefix("Bearer ").strip()
+def current_user(request: Request, authorization: str = Header(default="")) -> dict:
+    token = authorization.removeprefix("Bearer ").strip() or request.cookies.get(SESSION_COOKIE_NAME, "").strip()
     with connection() as db:
         user = db.execute(
             "SELECT u.*, s.created_at session_created_at FROM sessions s JOIN users u ON u.code=s.user_code WHERE s.token=? AND u.active=1", (token,)
@@ -299,16 +565,16 @@ def require_roles(*roles):
 ROLE_PERMISSIONS = {
     "admin": [
         "dashboard.view", "repository.view", "repository.upload", "policy.manage", "users.manage",
-        "permissions.manage", "backup.manage", "cloud.sync", "reports.view", "audit.view", "profile.manage", "transfer.manage",
+        "permissions.manage", "backup.manage", "cloud.sync", "reports.view", "audit.view", "profile.manage", "transfer.manage", "ingestion.auto",
     ],
     "head": [
-        "dashboard.view", "repository.view", "policy.manage", "cloud.sync", "transfer.manage", "quality.view", "reports.view", "profile.manage",
+        "dashboard.view", "repository.view", "policy.manage", "cloud.sync", "transfer.manage", "quality.view", "reports.view", "profile.manage", "ingestion.auto",
     ],
     "lecturer": [
-        "dashboard.view", "repository.own", "repository.upload", "cloud.sync", "versions.view", "chatbot.use", "profile.manage",
+        "dashboard.view", "repository.own", "repository.upload", "cloud.sync", "versions.view", "chatbot.use", "profile.manage", "ingestion.auto",
     ],
     "new_lecturer": [
-        "dashboard.view", "cloud.sync", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage",
+        "dashboard.view", "cloud.sync", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage", "ingestion.auto",
     ],
 }
 
@@ -325,6 +591,66 @@ def public_user(user: dict) -> dict:
         "department": user["department"],
         "permissions": permissions_for_role(user["role"]),
     }
+
+
+@app.post("/api/auth/login")
+def login(payload: Login, response: Response):
+    with transaction() as db:
+        user = db.execute("SELECT * FROM users WHERE code=? AND active=1", (payload.code.upper(),)).fetchone()
+        if not user or not verify_password(payload.password, user["password_hash"]):
+            raise HTTPException(401, "Mã đăng nhập hoặc mật khẩu không đúng.")
+        if password_needs_rehash(user["password_hash"]):
+            next_hash = hash_password(payload.password)
+            db.execute("UPDATE users SET password_hash=? WHERE code=?", (next_hash, user["code"]))
+            user = db.execute("SELECT * FROM users WHERE code=?", (user["code"],)).fetchone()
+        token = secrets.token_urlsafe(32)
+        db.execute("INSERT INTO sessions VALUES(?,?,?)", (token, user["code"], now()))
+        audit(db, user["code"], "auth.login", "session", token[:8])
+        set_session_cookie(response, token)
+        return {"token": token, "user": public_user(dict(user))}
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response, request: Request, authorization: str = Header(default=""), user: dict = Depends(current_user)):
+    token = authorization.removeprefix("Bearer ").strip() or request.cookies.get(SESSION_COOKIE_NAME, "").strip()
+    with transaction() as db:
+        db.execute("DELETE FROM sessions WHERE token=?", (token,))
+        audit(db, user["code"], "auth.logout", "session", token[:8])
+    clear_session_cookie(response)
+    return {"status": "ok"}
+
+
+@app.get("/api/dashboard")
+def dashboard(user: dict = Depends(current_user)):
+    with connection() as db:
+        docs = list_documents(db, user)
+        requests = rows(
+            db.execute(
+                "SELECT * FROM access_requests WHERE requester_code=? OR owner_code=? ORDER BY created_at DESC",
+                (user["code"], user["code"]),
+            ).fetchall()
+        )
+        for request in requests:
+            if request["requester_code"] == user["code"] and request["owner_code"] != user["code"]:
+                request["owner_code"] = "Ẩn danh"
+        return {
+            "user": public_user(user),
+            "stats": {
+                "documents": len(docs),
+                "private": sum(item["visibility"] == "private" for item in docs),
+                "topics": len({item["topic"] for item in docs}),
+            },
+            "documents": [
+                {**item, "v2_state": v2_state_for(db, item["id"])}
+                for item in anonymize_documents(docs, user)
+            ],
+            "requests": requests,
+            "backups": [
+                backup_record_with_manifest(dict(item))
+                for item in db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()
+            ],
+            "audit": rows(db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20").fetchall()) if user["role"] == "admin" else [],
+        }
 
 
 def get_document(db, document_id: str) -> dict:
@@ -366,7 +692,6 @@ def maybe_call_n8n_policy_webhook(payload: dict) -> dict:
         return {"status": "failed", "message": str(exc)}
 
 
-@app.get("/health")
 @app.get("/api/health")
 def health():
     return {
@@ -432,215 +757,16 @@ def n8n_heartbeat(payload: AutomationHeartbeatInput, _: None = Depends(require_i
         raise HTTPException(422, str(exc))
 
 
-@app.get("/api/cloud/connections")
-def cloud_connections(user: dict = Depends(current_user)):
-    with connection() as db:
-        return list_connections(db, user["code"])
-
-
-@app.post("/api/cloud/connect")
-def connect_cloud(payload: CloudConnectInput, user: dict = Depends(current_user)):
-    try:
-        with transaction() as db:
-            url = authorization_url(db, user["code"], payload.provider)
-            audit(db, user["code"], "cloud.connect_started", "cloud", payload.provider)
-            return {"authorization_url": url}
-    except ValueError as exc:
-        raise HTTPException(503, str(exc))
-
-
-@app.get("/api/cloud/callback/{provider}", response_class=HTMLResponse)
-def cloud_callback(provider: str, state: str, code: str):
-    if provider not in PROVIDERS:
-        raise HTTPException(404, "Nhà cung cấp cloud không được hỗ trợ.")
-    try:
-        with transaction() as db:
-            result = exchange_code(db, provider, state, code)
-            audit(db, result["user_code"], "cloud.connected", "cloud", provider, {"account": result["account_email"]})
-        return HTMLResponse("<h2>Kết nối thành công</h2><p>Bạn có thể đóng cửa sổ này và quay lại EduVault.</p><script>setTimeout(()=>window.close(),1500)</script>")
-    except Exception as exc:
-        return HTMLResponse(f"<h2>Kết nối thất bại</h2><p>{html.escape(str(exc))}</p>", status_code=400)
-
-
-@app.delete("/api/cloud/connections/{provider}")
-def disconnect_cloud(provider: Literal["google_drive", "onedrive"], user: dict = Depends(current_user)):
-    with transaction() as db:
-        disconnect(db, user["code"], provider)
-        audit(db, user["code"], "cloud.disconnected", "cloud", provider)
-    return {"status": "disconnected", "provider": provider}
-
-
-@app.post("/api/cloud/connections/{provider}/sync")
-def sync_personal_cloud(provider: Literal["google_drive", "onedrive"], user: dict = Depends(current_user)):
-    with transaction() as db:
-        if not db.execute(
-            "SELECT 1 FROM cloud_connections WHERE user_code=? AND provider=? AND status='connected'",
-            (user["code"], provider),
-        ).fetchone():
-            raise HTTPException(404, "Kho cloud cá nhân chưa được kết nối.")
-        results = []
-        for document in db.execute(
-            "SELECT * FROM documents WHERE owner_code=? AND deleted_at IS NULL", (user["code"],)
-        ).fetchall():
-            asset = db.execute(
-                """SELECT original_path FROM file_assets
-                   WHERE document_id=? AND version_no=?
-                   ORDER BY created_at DESC, id DESC LIMIT 1""",
-                (document["id"], document["current_version"]),
-            ).fetchone()
-            version = db.execute(
-                "SELECT storage_path FROM versions WHERE document_id=? AND version_no=?",
-                (document["id"], document["current_version"]),
-            ).fetchone()
-            source_path = asset["original_path"] if asset else version["storage_path"]
-            results.extend(sync_user_document(db, user["code"], document["id"], __import__("pathlib").Path(source_path), provider))
-        audit(db, user["code"], "cloud.sync", "cloud", provider, {"documents": len(results)})
-        return {"provider": provider, "results": results}
-
-
-@app.post("/api/auth/login")
-def login(payload: Login):
-    with transaction() as db:
-        user = db.execute("SELECT * FROM users WHERE code=? AND active=1", (payload.code.upper(),)).fetchone()
-        if not user or user["password_hash"] != hash_secret(payload.password):
-            raise HTTPException(401, "Mã đăng nhập hoặc mật khẩu không đúng.")
-        token = secrets.token_urlsafe(32)
-        db.execute("INSERT INTO sessions VALUES(?,?,?)", (token, user["code"], now()))
-        audit(db, user["code"], "auth.login", "session", token[:8])
-        return {"token": token, "user": public_user(dict(user))}
-
-
-@app.post("/api/auth/logout")
-def logout(authorization: str = Header(default=""), user: dict = Depends(current_user)):
-    token = authorization.removeprefix("Bearer ").strip()
-    with transaction() as db:
-        db.execute("DELETE FROM sessions WHERE token=?", (token,))
-        audit(db, user["code"], "auth.logout", "session", token[:8])
-    return {"status": "ok"}
-
-
-@app.get("/api/dashboard")
-def dashboard(user: dict = Depends(current_user)):
-    with connection() as db:
-        docs = list_documents(db, user)
-        requests = rows(db.execute("SELECT * FROM access_requests WHERE requester_code=? OR owner_code=? ORDER BY created_at DESC", (user["code"], user["code"])).fetchall())
-        for request in requests:
-            if request["requester_code"] == user["code"] and request["owner_code"] != user["code"]:
-                request["owner_code"] = "Ẩn danh"
-        return {
-            "user": public_user(user),
-            "stats": {"documents": len(docs), "private": sum(d["visibility"] == "private" for d in docs), "topics": len({d["topic"] for d in docs})},
-            "documents": [
-                {**item, "v2_state": v2_state_for(db, item["id"])}
-                for item in anonymize_documents(docs, user)
-            ],
-            "requests": requests,
-            "backups": [
-                backup_record_with_manifest(dict(item))
-                for item in db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()
-            ],
-            "audit": rows(db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20").fetchall()) if user["role"] == "admin" else [],
-        }
-
-
-@app.post("/api/documents/analyze")
-def analyze(payload: AnalyzeInput, user: dict = Depends(current_user)):
-    with connection() as db:
-        prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
-        import json
-        prompts = json.loads(prompt_row["value"]) if prompt_row else {}
-        metadata = guess_metadata(payload.filename, payload.content, prompts.get("metadata_instructions"))
-        duplicate = db.execute("SELECT id,title FROM documents WHERE content_hash=?", (hash_secret(payload.content.strip()),)).fetchone()
-        folder_path = suggest_folder(db, user, {**metadata, "visibility": "public"})
-    return {"metadata": metadata, "folder_path": folder_path, "duplicate": dict(duplicate) if duplicate else None, "ai": ai_provider.status()}
-
-
-@app.post("/api/documents/analyze-file")
-async def analyze_file(request: Request, x_filename: str = Header(), user: dict = Depends(current_user)):
-    from urllib.parse import unquote
-    content_length = int(request.headers.get("content-length", "0") or 0)
-    if content_length > MAX_AI_ANALYZE_BYTES:
-        raise HTTPException(
-            413,
-            f"File quá lớn để AI phân tích trực tiếp. Giới hạn hiện tại là {MAX_AI_ANALYZE_BYTES // 1024 // 1024} MB; "
-            "hãy nhập metadata thủ công để lưu file hoặc dùng xử lý nền.",
-        )
-    try:
-        raw = await request.body()
-    except ClientDisconnect:
-        raise HTTPException(400, "Kết nối tải file bị ngắt trước khi hoàn tất. Hãy thử tải lại.")
-    if not raw:
-        raise HTTPException(400, "File phân tích đang trống.")
-    if len(raw) > MAX_AI_ANALYZE_BYTES:
-        raise HTTPException(
-            413,
-            f"File quá lớn để AI phân tích trực tiếp. Giới hạn hiện tại là {MAX_AI_ANALYZE_BYTES // 1024 // 1024} MB; "
-            "hãy nhập metadata thủ công để lưu file hoặc dùng xử lý nền.",
-        )
-    filename = unquote(x_filename)
-    content = extract_text(filename, request.headers.get("content-type", "application/octet-stream"), raw)
-    with connection() as db:
-        import json
-        prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
-        prompts = json.loads(prompt_row["value"]) if prompt_row else {}
-        metadata = guess_metadata(filename, content, prompts.get("metadata_instructions"))
-        duplicate = db.execute("SELECT id,title FROM documents WHERE content_hash=?", (hash_secret(content.strip()),)).fetchone()
-        folder_path = suggest_folder(db, user, {**metadata, "visibility": "public"})
-        upload_suggestion = suggest_upload_destination(db, user, filename, content)
-    return {
-        "metadata": metadata,
-        "folder_path": upload_suggestion.get("folder_path") or folder_path,
-        "folder_node_id": upload_suggestion.get("folder_node_id"),
-        "duplicate": dict(duplicate) if duplicate else None,
-        "content_preview": content[:5000], "ai": ai_provider.status(),
-    }
-
-
-@app.post("/api/folders/suggest")
-def folder_suggestion(payload: DocumentInput, user: dict = Depends(current_user)):
-    with connection() as db:
-        return {"folder_path": suggest_folder(db, user, payload.model_dump())}
-
-
-class FolderSuggestCoursePayload(BaseModel):
-    description: str
-
-
-@app.post("/api/folders/suggest-course")
-def folder_suggest_course(payload: FolderSuggestCoursePayload, user: dict = Depends(current_user)):
-    with connection() as db:
-        suggestion = suggest_upload_destination(db, dict(user), "", payload.description)
-    return suggestion
-
-
-class FolderCreateRequestPayload(BaseModel):
-    folder_name: str
-    parent_path: str = ""
-    reason: str = ""
-
-
-@app.post("/api/folders/request-create")
-def folder_request_create(payload: FolderCreateRequestPayload, user: dict = Depends(current_user)):
-    with transaction() as db:
-        audit(db, user["code"], "folder.request_create", "folder", payload.folder_name, {
-            "folder_name": payload.folder_name,
-            "parent_path": payload.parent_path,
-            "reason": payload.reason,
-        })
-    return {"status": "ok", "message": "Yêu cầu tạo thư mục đã được gửi đến admin duyệt."}
-
-
-@app.get("/api/folders/tree")
-def folder_tree(user: dict = Depends(current_user)):
-    with connection() as db:
-        documents = list_documents(db, user)
-    tree: dict = {}
-    for document in documents:
-        node = tree
-        for segment in (document.get("folder_path") or "Unsorted").split("/"):
-            node = node.setdefault(segment, {})
-        node.setdefault("_documents", []).append({"id": document["id"], "title": document["title"]})
-    return tree
+app.include_router(
+    build_cloud_router(
+        current_user_dependency=current_user,
+        cloud_connect_input=CloudConnectInput,
+        connection_factory=connection,
+        transaction_factory=transaction,
+        audit_func=audit,
+        sync_user_document_func=lambda *args, **kwargs: sync_user_document(*args, **kwargs),
+    )
+)
 
 
 @app.post("/api/policies/upload", status_code=201)
@@ -648,15 +774,16 @@ async def upload_policy(
     request: Request,
     x_filename: str = Header(default="policy.txt"),
     x_title: str = Header(default="Policy khoa"),
-    user: dict = Depends(require_roles("admin")),
+    user: dict = Depends(require_roles("admin", "head")),
 ):
     from urllib.parse import unquote
+
     raw = await request.body()
     if not raw:
         raise HTTPException(400, "File policy dang trong.")
-    with transaction() as db:
-        try:
-            return create_policy_file(
+    try:
+        with transaction() as db:
+            result = create_policy_file(
                 db,
                 user,
                 unquote(x_title),
@@ -664,8 +791,10 @@ async def upload_policy(
                 raw,
                 request.headers.get("content-type", "text/plain"),
             )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            result["filename"] = unquote(x_filename)
+            return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/policies")
@@ -675,16 +804,16 @@ def policy_files(user: dict = Depends(require_roles("admin", "head"))):
 
 
 @app.post("/api/policies/{policy_id}/activate")
-def activate_policy(policy_id: str, user: dict = Depends(require_roles("admin"))):
+def activate_policy(policy_id: str, user: dict = Depends(require_roles("admin", "head"))):
     try:
         with transaction() as db:
             return activate_policy_file(db, user, policy_id)
     except ValueError as exc:
-        raise HTTPException(404, str(exc))
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/api/policies/{policy_id}/activation-preview")
-def policy_activation_preview(policy_id: str, user: dict = Depends(require_roles("admin"))):
+def policy_activation_preview(policy_id: str, user: dict = Depends(require_roles("admin", "head"))):
     try:
         with connection() as db:
             return preview_policy_activation(db, policy_id)
@@ -703,11 +832,12 @@ def delete_policy(policy_id: str, user: dict = Depends(require_roles("admin"))):
         raise HTTPException(404, str(exc)) from exc
 
 
+
 @app.post("/api/policy-assistant/preview")
 def policy_assistant_preview(payload: PolicyAssistantInput, user: dict = Depends(require_roles("admin", "head"))):
     with transaction() as db:
         try:
-            return preview_policy_action(db, payload.message, user)
+            return preview_policy_action(db, payload.message, payload.history, user)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -717,9 +847,15 @@ def policy_assistant_confirm(payload: PolicyAssistantConfirmInput, user: dict = 
     applied = None
     try:
         with transaction() as db:
-            request = create_policy_action_request(db, user, payload.message, payload.action, payload.preview)
-            if payload.apply_now:
-                applied = apply_policy_action(db, user["code"], payload.action, request["id"])
+            if payload.request_id and not payload.message:
+                # Chatbot shortcut flow
+                from .policy_management import confirm_policy_request
+                return confirm_policy_request(db, user, payload.request_id)
+            else:
+                # Legacy explicit flow
+                request = create_policy_action_request(db, user, payload.message, payload.action, payload.preview)
+                if payload.apply_now:
+                    applied = apply_policy_action(db, user["code"], payload.action, request["id"])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     n8n = {"status": "skipped", "reason": "apply_now"} if payload.apply_now else maybe_call_n8n_policy_webhook(request["webhook_payload"])
@@ -836,6 +972,26 @@ def api_specializations(user: dict = Depends(current_user)):
         return public_specializations(db)
 
 
+@app.get("/api/folders/tree")
+def folders_tree(user: dict = Depends(current_user)):
+    with connection() as db:
+        tree: dict = {}
+        for document in list_documents(db, user):
+            parts = [part for part in str(document.get("folder_path") or document.get("topic") or "Khac").split("/") if part]
+            node = tree
+            for part in parts:
+                node = node.setdefault(part, {})
+            node.setdefault("_documents", []).append({"id": document["id"], "title": document["title"]})
+        return tree
+
+
+@app.post("/api/folders/suggest")
+def folders_suggest(payload: dict, user: dict = Depends(current_user)):
+    with connection() as db:
+        folder_path = suggest_folder(db, user, payload)
+        return {"folder_path": folder_path}
+
+
 @app.get("/api/profile/specializations")
 def get_profile_specializations(user: dict = Depends(current_user)):
     with connection() as db:
@@ -903,9 +1059,9 @@ def api_my_assignment(user: dict = Depends(current_user)):
 def change_password(payload: PasswordChange, user: dict = Depends(current_user)):
     with transaction() as db:
         row = db.execute("SELECT password_hash FROM users WHERE code=?", (user["code"],)).fetchone()
-        if not row or row["password_hash"] != hash_secret(payload.current_password):
+        if not row or not verify_password(payload.current_password, row["password_hash"]):
             raise HTTPException(400, "Mật khẩu hiện tại không đúng.")
-        db.execute("UPDATE users SET password_hash=? WHERE code=?", (hash_secret(payload.new_password), user["code"]))
+        db.execute("UPDATE users SET password_hash=? WHERE code=?", (hash_password(payload.new_password), user["code"]))
         audit(db, user["code"], "user.password_change", "user", user["code"])
     return {"message": "Đổi mật khẩu thành công."}
 
@@ -1066,6 +1222,46 @@ def create(payload: DocumentInput, user: dict = Depends(current_user)):
         raise HTTPException(403, str(exc))
 
 
+@app.post("/api/documents/analyze-file")
+async def analyze_file(request: Request, x_filename: str = Header(), user: dict = Depends(current_user)):
+    from urllib.parse import unquote
+
+    content_length = int(request.headers.get("content-length", "0") or 0)
+    if content_length > MAX_AI_ANALYZE_BYTES:
+        raise HTTPException(
+            413,
+            f"File qu\u00e1 l\u1edbn \u0111\u1ec3 AI ph\u00e2n t\u00edch tr\u1ef1c ti\u1ebfp. Gi\u1edbi h\u1ea1n hi\u1ec7n t\u1ea1i l\u00e0 {MAX_AI_ANALYZE_BYTES // 1024 // 1024}MB.",
+        )
+    try:
+        raw = await request.body()
+    except ClientDisconnect as exc:
+        raise HTTPException(400, "Ket noi upload bi ngat truoc khi backend nhan du file.") from exc
+    if not raw:
+        raise HTTPException(400, "File dang trong.")
+    if len(raw) > MAX_AI_ANALYZE_BYTES:
+        raise HTTPException(
+            413,
+            f"File qu\u00e1 l\u1edbn \u0111\u1ec3 AI ph\u00e2n t\u00edch tr\u1ef1c ti\u1ebfp. Gi\u1edbi h\u1ea1n hi\u1ec7n t\u1ea1i l\u00e0 {MAX_AI_ANALYZE_BYTES // 1024 // 1024}MB.",
+        )
+    filename = unquote(x_filename)
+    content = extract_text(filename, request.headers.get("content-type", "application/octet-stream"), raw)
+    with connection() as db:
+        prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
+        prompts = json.loads(prompt_row["value"]) if prompt_row else {}
+        metadata = guess_metadata(filename, content, prompts.get("metadata_instructions"))
+        duplicate = db.execute("SELECT id,title FROM documents WHERE content_hash=?", (hash_secret(content.strip()),)).fetchone()
+        folder_path = suggest_folder(db, user, {**metadata, "visibility": "public"})
+        upload_suggestion = suggest_upload_destination(db, user, filename, content)
+    return {
+        "metadata": metadata,
+        "folder_path": upload_suggestion.get("folder_path") or folder_path,
+        "folder_node_id": upload_suggestion.get("folder_node_id"),
+        "duplicate": dict(duplicate) if duplicate else None,
+        "content_preview": content[:5000],
+        "ai": ai_provider.status(),
+    }
+
+
 def upload_task_public(task) -> dict:
     item = dict(task)
     item["metadata"] = json.loads(item["metadata"])
@@ -1208,28 +1404,17 @@ def process_upload_task(task_id: str) -> None:
 def process_document_background(document_id: str, task_id: str | None = None) -> None:
     try:
         with transaction() as db:
-            document = run_document_processing_jobs(db, document_id)
-            if task_id:
-                db.execute(
-                    "UPDATE upload_tasks SET status='completed',document_id=?,error=NULL,updated_at=? WHERE id=?",
-                    (document_id, now(), task_id),
-                )
-            version = db.execute(
-                "SELECT storage_path FROM versions WHERE document_id=? AND version_no=?",
-                (document_id, document["current_version"]),
-            ).fetchone()
-            if version:
-                sync_document(db, document_id, __import__("pathlib").Path(version["storage_path"]))
-            asset = db.execute(
-                "SELECT original_path FROM file_assets WHERE document_id=? AND version_no=? ORDER BY created_at DESC LIMIT 1",
-                (document_id, document["current_version"]),
-            ).fetchone()
-            if asset:
-                sync_user_document(db, document["owner_code"], document_id, __import__("pathlib").Path(asset["original_path"]))
+            process_document_background_task(db, document_id, task_id)
     except Exception as exc:
         with transaction() as db:
             if task_id:
                 db.execute("UPDATE upload_tasks SET status='failed',error=?,updated_at=? WHERE id=?", (str(exc), now(), task_id))
+            try:
+                from .services import emit_outbox
+
+                emit_outbox(db, "document.processing_failed", document_id, {"task_id": task_id, "error": str(exc)})
+            except Exception:
+                pass
 
 
 def save_upload_task_fast(task_id: str) -> str:
@@ -1292,6 +1477,21 @@ def save_upload_task_fast(task_id: str) -> str:
 
 @app.post("/api/uploads/init", status_code=201)
 def init_upload(payload: UploadInitInput, user: dict = Depends(current_user)):
+    with transaction() as db:
+        existing_document = get_active_document(db, payload.existing_document_id) if payload.existing_document_id else None
+        return create_upload_task(
+            db,
+            user,
+            {
+                "filename": payload.filename,
+                "mime_type": payload.mime_type,
+                "total_bytes": payload.total_bytes,
+                "folder_node_id": payload.folder_node_id,
+                "existing_document": existing_document,
+                "metadata": payload.model_dump(),
+            },
+            max_upload_bytes=MAX_UPLOAD_BYTES,
+        )
     if payload.total_bytes > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
     if payload.existing_document_id:
@@ -1337,6 +1537,8 @@ async def upload_chunk(
     user: dict = Depends(current_user),
 ):
     chunk = await request.body()
+    with transaction() as db:
+        return append_upload_chunk(db, task_id, user, chunk, x_upload_offset)
     if not chunk:
         raise HTTPException(400, "Chunk tải lên đang trống.")
     with transaction() as db:
@@ -1365,120 +1567,30 @@ async def upload_chunk(
 @app.post("/api/uploads/{task_id}/analyze", status_code=202)
 def analyze_upload(task_id: str, user: dict = Depends(current_user)):
     with transaction() as db:
-        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
-        if not task:
-            raise HTTPException(404, "Khong tim thay tac vu tai len.")
-        if task["uploaded_bytes"] != task["total_bytes"]:
-            raise HTTPException(409, "File chua duoc tai len day du.")
-        if task["status"] in {"completed", "processing"}:
-            return upload_task_public(task)
-        create_classification_ticket(db, task, dict(user))
-        result = upload_task_public(db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone())
-    return result
+        task = get_upload_task_row(db, task_id, user["code"])
+        try:
+            return analyze_upload_task(db, task, dict(user))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
 
 
 @app.post("/api/uploads/{task_id}/confirm", status_code=201)
 def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
     with transaction() as db:
-        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
-        if not task:
-            raise HTTPException(404, "Khong tim thay tac vu tai len.")
-        if task["uploaded_bytes"] != task["total_bytes"]:
-            raise HTTPException(409, "File chua duoc tai len day du.")
-        ticket = db.execute(
-            "SELECT * FROM document_classification_tickets WHERE upload_task_id=? AND user_code=? ORDER BY created_at DESC LIMIT 1",
-            (task_id, user["code"]),
-        ).fetchone()
-        if not ticket:
-            ticket = create_classification_ticket(db, task, dict(user))
-            ticket = db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket["id"],)).fetchone()
-        if ticket["status"] == "CONFIRMED" and ticket["document_id"]:
-            return {"ticket": classification_ticket_public(ticket), "document": dict(db.execute("SELECT * FROM documents WHERE id=?", (ticket["document_id"],)).fetchone())}
-
-        metadata = json.loads(task["metadata"])
-        final_specialization_id = payload.specialization_id
-        final_course_id = payload.course_id
-        final_document_type = payload.document_type
-        selected_node = validate_folder_access(db, user, payload.folder_node_id) if payload.folder_node_id else None
-        if selected_node and selected_node["type"] in {"faculty", "specialization", "course"}:
-            raise HTTPException(400, "Document must be saved inside a document-type folder.")
-        if selected_node and selected_node["type"] == "standard_folder":
-            final_document_type = selected_node["name"]
-            final_course_id = selected_node["parent_id"]
-        selected_document_folder = bool(selected_node and selected_node["type"] in {"standard_folder", "folder", "document_type_folder"})
-        if final_document_type not in DOCUMENT_TYPES and not selected_document_folder:
-            raise HTTPException(422, "Loai tai lieu khong hop le.")
-        selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
-        if selected_course:
-            spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
-            specialization = db.execute("SELECT * FROM specializations WHERE folder_node_id=?", (spec_node["id"],)).fetchone() if spec_node else None
-            final_specialization_id = specialization["id"] if specialization else final_specialization_id
-        assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
-        if not assignment["folder_node_id"] and payload.folder_path:
-            assignment["folder_path"] = payload.folder_path
-        if final_course_id and not assignment["folder_node_id"] and not assignment["folder_path"]:
-            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
-        if active_policy(db) and not assignment["folder_node_id"] and not assignment["folder_path"]:
-            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
-        destination_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND status='active'", (assignment["folder_node_id"],)).fetchone() if assignment["folder_node_id"] else None
-        if destination_node and destination_node["type"] in {"faculty", "specialization", "course"}:
-            raise HTTPException(400, "Document must be saved inside a document-type folder.")
-        print(json.dumps({
-            "document_title": metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem,
-            "course_id": final_course_id,
-            "document_type": final_document_type,
-            "resolved_destination_folder_id": assignment["folder_node_id"],
-            "resolved_destination_folder_name": destination_node["name"] if destination_node else None,
-            "resolved_destination_folder_type": destination_node["type"] if destination_node else None,
-            "final_destination_source": payload.final_destination_source,
-        }, ensure_ascii=True))
-        title = metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem
-        topic = selected_course["name"] if selected_course else metadata.get("topic") or final_document_type
-        raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
-        preview = quick_preview_text(task["filename"], task["mime_type"], raw)
-        document_payload = {
-            "title": title,
-            "topic": topic,
-            "doc_type": final_document_type,
-            "document_type": final_document_type,
-            "visibility": payload.visibility,
-            "folder_path": assignment["folder_path"],
-            "folder_node_id": assignment["folder_node_id"],
-            "specialization_id": final_specialization_id,
-            "course_id": final_course_id,
-            "content": f"File: {task['filename']}\nStatus: SAVED. AI processing is waiting in background.\n\n{preview[:4000]}",
-        }
-        existing_id = metadata.get("existing_document_id")
-        if existing_id:
-            document = update_document(db, dict(user), get_active_document(db, existing_id), document_payload, defer_processing=True)
-            version_no = document["current_version"]
-        else:
-            document = create_document(db, dict(user), document_payload, defer_processing=True)
-            version_no = 1
-        asset = save_file_asset(db, document["id"], version_no, task["filename"], task["mime_type"], raw, defer_processing=True)
-        enqueue_processing_jobs(db, document["id"])
-        db.execute(
-            "UPDATE documents SET status='SAVED',specialization_id=?,course_id=?,document_type=?,folder_node_id=?,folder_path=?,updated_at=? WHERE id=?",
-            (final_specialization_id, final_course_id, final_document_type, assignment["folder_node_id"], assignment["folder_path"], now(), document["id"]),
-        )
-        db.execute(
-            "UPDATE document_classification_tickets SET selected_specialization_id=?,selected_course_id=?,selected_document_type=?,selected_visibility=?,status='CONFIRMED',document_id=?,updated_at=? WHERE id=?",
-            (final_specialization_id, final_course_id, final_document_type, payload.visibility, document["id"], now(), ticket["id"]),
-        )
-        db.execute(
-            "UPDATE upload_tasks SET status='processing',document_id=?,error=NULL,updated_at=? WHERE id=?",
-            (document["id"], now(), task_id),
-        )
-        audit(db, user["code"], "upload.confirmed", "document", document["id"], {"ticket_id": ticket["id"], "asset_id": asset["id"]})
-        document = dict(db.execute("SELECT * FROM documents WHERE id=?", (document["id"],)).fetchone())
-        ticket_public = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket["id"],)).fetchone())
-    background_tasks.add_task(process_document_background, document["id"], task_id)
+        task = get_upload_task_row(db, task_id, user["code"])
+        result = confirm_upload_task(db, task, payload.model_dump(exclude_none=True), dict(user))
+        document = result["document"]
+        ticket_public = result["ticket"]
+        asset = result["asset"]
+    if asset:
+        background_tasks.add_task(process_document_background, document["id"], task_id)
     return {"ticket": ticket_public, "document": document, "asset": asset}
 
 
 @app.get("/api/uploads")
 def upload_tasks(user: dict = Depends(current_user)):
     with connection() as db:
+        return list_ingestion_tasks(db, user)
         return [
             upload_task_public(task)
             for task in db.execute(
@@ -1491,14 +1603,34 @@ def upload_tasks(user: dict = Depends(current_user)):
 @app.get("/api/uploads/{task_id}")
 def upload_status(task_id: str, user: dict = Depends(current_user)):
     with connection() as db:
+        return get_upload_task_public(db, task_id, user)
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
             raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
         return upload_task_public(task)
 
 
+@app.get("/api/uploads/{task_id}/file")
+def upload_task_file(task_id: str, user: dict = Depends(current_user)):
+    with connection() as db:
+        task = get_upload_task_row(db, task_id, user["code"])
+    temp_path = Path(task["temp_path"])
+    if not temp_path.exists():
+        raise HTTPException(404, "Không tìm thấy tệp tạm của tác vụ tải lên.")
+    return FileResponse(
+        temp_path,
+        filename=task["filename"],
+        media_type=task["mime_type"] or "application/octet-stream",
+    )
+
+
 @app.delete("/api/uploads/{task_id}")
 def delete_upload_task(task_id: str, user: dict = Depends(current_user)):
+    with transaction() as db:
+        response, temp_path = delete_ingestion_task(db, task_id, user)
+    if temp_path.exists():
+        temp_path.unlink()
+    return response
     with transaction() as db:
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
@@ -1513,6 +1645,30 @@ def delete_upload_task(task_id: str, user: dict = Depends(current_user)):
     if temp_path.exists():
         temp_path.unlink()
     return {"status": "deleted" if task["document_id"] else "cancelled", "id": task_id}
+
+
+app.include_router(
+    build_desktop_router(
+        current_user_dependency=current_user,
+        desktop_agent_heartbeat_input=DesktopAgentHeartbeatInput,
+        desktop_sync_folders_input=DesktopSyncFoldersInput,
+        connection_factory=connection,
+        transaction_factory=transaction,
+        root_path=ROOT,
+        desktop_agent_sync_config_func=desktop_agent_sync_config,
+        desktop_agent_status_func=desktop_agent_status,
+        upsert_desktop_agent_device_func=upsert_desktop_agent_device,
+        list_desktop_sync_folders_func=list_desktop_sync_folders,
+        replace_desktop_sync_folders_func=replace_desktop_sync_folders,
+        audit_func=audit,
+        force_source_type_func=force_source_type,
+        upload_init_input=UploadInitInput,
+        init_upload_func=init_upload,
+        upload_chunk_func=upload_chunk,
+        analyze_upload_func=analyze_upload,
+        upload_status_func=upload_status,
+    )
+)
 
 
 @app.post("/api/documents/upload", status_code=201)
@@ -1531,24 +1687,29 @@ async def upload_document(
     from urllib.parse import unquote
     content_length = int(request.headers.get("content-length", "0") or 0)
     if content_length > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
+        raise HTTPException(413, f"File v??t qu? gi?i h?n t?i l?n {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
     try:
         raw = await request.body()
     except ClientDisconnect:
-        raise HTTPException(400, "Kết nối tải file bị ngắt trước khi hoàn tất. Hãy thử tải lại.")
+        raise HTTPException(400, "K?t n?i t?i file b? ng?t tr??c khi ho?n t?t. H?y th? t?i l?i.")
     if not raw:
-        raise HTTPException(400, "File tải lên đang trống.")
+        raise HTTPException(400, "File t?i l?n ?ang tr?ng.")
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
+        raise HTTPException(413, f"File v??t qu? gi?i h?n t?i l?n {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
     doc_type = unquote(x_doc_type)
     if doc_type not in DOCUMENT_TYPES:
-        doc_type = "Tài liệu khác"
+        doc_type = "T?i li?u kh?c"
     payload = {
-        "title": unquote(x_title), "topic": unquote(x_topic), "doc_type": doc_type,
-        "visibility": x_visibility, "content": quick_preview_text(filename, mime_type, raw) or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
-        "folder_path": unquote(x_folder_path) or None, "folder_node_id": x_folder_node_id or None,
+        "title": unquote(x_title),
+        "topic": unquote(x_topic),
+        "doc_type": doc_type,
+        "visibility": x_visibility,
+        "content": quick_preview_text(filename, mime_type, raw)
+        or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
+        "folder_path": unquote(x_folder_path) or None,
+        "folder_node_id": x_folder_node_id or None,
     }
     try:
         with transaction() as db:
@@ -1588,20 +1749,25 @@ async def upload_new_version(
     try:
         raw = await request.body()
     except ClientDisconnect:
-        raise HTTPException(400, "Kết nối tải file bị ngắt trước khi hoàn tất. Hãy thử tải lại.")
+        raise HTTPException(400, "K?t n?i t?i file b? ng?t tr??c khi ho?n t?t. H?y th? t?i l?i.")
     if not raw:
-        raise HTTPException(400, "File tải lên đang trống.")
+        raise HTTPException(400, "File t?i l?n ?ang tr?ng.")
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File exceeds the configured {MAX_UPLOAD_BYTES // 1024 // 1024} MB limit.")
+        raise HTTPException(413, f"File v??t qu? gi?i h?n t?i l?n {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
     doc_type = unquote(x_doc_type)
     if doc_type not in DOCUMENT_TYPES:
-        doc_type = "Tài liệu khác"
+        doc_type = "T?i li?u kh?c"
     payload = {
-        "title": unquote(x_title), "topic": unquote(x_topic), "doc_type": doc_type,
-        "visibility": x_visibility, "content": quick_preview_text(filename, mime_type, raw) or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
-        "folder_path": unquote(x_folder_path) or None, "folder_node_id": x_folder_node_id or None,
+        "title": unquote(x_title),
+        "topic": unquote(x_topic),
+        "doc_type": doc_type,
+        "visibility": x_visibility,
+        "content": quick_preview_text(filename, mime_type, raw)
+        or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
+        "folder_path": unquote(x_folder_path) or None,
+        "folder_node_id": x_folder_node_id or None,
     }
     try:
         with transaction() as db:
@@ -1617,6 +1783,8 @@ async def upload_new_version(
             document = dict(db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone())
         background_tasks.add_task(process_document_background, document_id, None)
         return {"document": document, "asset": asset}
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
     except PermissionError as exc:
         raise HTTPException(403, str(exc))
 
@@ -1726,6 +1894,112 @@ def provenance(document_id: str, user: dict = Depends(current_user)):
         }
 
 
+def _safe_download_name(value: str, fallback: str = "EduVault-tai-lieu") -> str:
+    normalized = unicodedata.normalize("NFD", value or "")
+    ascii_name = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    ascii_name = ascii_name.replace("đ", "d").replace("Đ", "D")
+    ascii_name = re.sub(r"[^\w.\-\s]", "", ascii_name, flags=re.UNICODE).strip()
+    ascii_name = re.sub(r"[\s_]+", "-", ascii_name).strip(".-")
+    return (ascii_name or fallback)[:160]
+
+
+def _content_disposition(filename: str) -> str:
+    ascii_name = _safe_download_name(filename)
+    quoted = quote(filename)
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'
+
+
+def _latest_document_asset(db, document_id: str):
+    return db.execute(
+        "SELECT * FROM file_assets WHERE document_id=? ORDER BY version_no DESC, created_at DESC LIMIT 1",
+        (document_id,),
+    ).fetchone()
+
+
+def _build_zip_name(documents: list[dict], requested_name: str | None = None) -> str:
+    if requested_name:
+        base = requested_name[:-4] if requested_name.lower().endswith(".zip") else requested_name
+        return _safe_download_name(base, "EduVault-tai-lieu") + ".zip"
+    today = datetime.now().strftime("%Y%m%d")
+    if not documents:
+        return f"EduVault-tai-lieu_{today}.zip"
+    topics = {str(doc.get("topic") or "").strip() for doc in documents if str(doc.get("topic") or "").strip()}
+    if len(topics) == 1:
+        return f"{_safe_download_name(next(iter(topics)), 'EduVault')}_{len(documents)}-tai-lieu_{today}.zip"
+    if len(documents) <= 2:
+        return f"{_safe_download_name(str(documents[0].get('title') or 'EduVault'), 'EduVault')}_{today}.zip"
+    merged = "-".join(str(doc.get("title") or "") for doc in documents[:2])
+    return f"EduVault_{_safe_download_name(merged, 'tai-lieu')}_{len(documents)}-file_{today}.zip"
+
+
+def _dedupe_archive_name(filename: str, used: set[str]) -> str:
+    safe = _safe_download_name(filename, "file")
+    stem = Path(safe).stem or "file"
+    suffix = Path(safe).suffix
+    candidate = safe
+    index = 1
+    while candidate.casefold() in used:
+        candidate = f"{stem}_{index}{suffix}"
+        index += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
+@app.get("/api/documents/{document_id}/download")
+def download_document(document_id: str, user: dict = Depends(current_user)):
+    with connection() as db:
+        document = get_document(db, document_id)
+        if not can_read(db, user, document):
+            raise HTTPException(403, "Ban khong co quyen tai tai lieu.")
+        asset = _latest_document_asset(db, document_id)
+        if not asset:
+            raise HTTPException(404, "Tai lieu chua co file goc de tai.")
+        path = Path(asset["original_path"])
+        if not path.exists() or not path.is_file():
+            raise HTTPException(404, "Khong tim thay file goc tren may chu.")
+        audit(db, user["code"], "file.download", "document", document_id, {"asset_id": asset["id"]})
+        return FileResponse(
+            str(path),
+            filename=asset["original_name"],
+            media_type=asset["mime_type"] or "application/octet-stream",
+            headers={"Content-Disposition": _content_disposition(asset["original_name"])},
+        )
+
+
+@app.post("/api/documents/batch-download")
+def batch_download_documents(payload: BatchDownloadInput, user: dict = Depends(current_user)):
+    with connection() as db:
+        archive_buffer = BytesIO()
+        used_names: set[str] = set()
+        included_documents: list[dict] = []
+
+        with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for document_id in dict.fromkeys(payload.document_ids):
+                document = get_document(db, document_id)
+                if not can_read(db, user, document):
+                    raise HTTPException(403, "Ban khong co quyen tai mot hoac nhieu tai lieu.")
+                asset = _latest_document_asset(db, document_id)
+                if not asset:
+                    continue
+                path = Path(asset["original_path"])
+                if not path.exists() or not path.is_file():
+                    continue
+                archive.write(path, _dedupe_archive_name(asset["original_name"], used_names))
+                included_documents.append(dict(document))
+
+        if not included_documents:
+            raise HTTPException(404, "Khong co file hop le de nen.")
+
+        archive_buffer.seek(0)
+        zip_name = _build_zip_name(included_documents, payload.zip_name)
+        audit(db, user["code"], "file.batch_download", "document", None, {"count": len(included_documents), "zip_name": zip_name})
+        return StreamingResponse(
+            archive_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": _content_disposition(zip_name), "X-Zip-Filename": quote(zip_name)},
+        )
+
+
 @app.get("/api/files/{asset_id}")
 def download_file(asset_id: str, user: dict = Depends(current_user)):
     with connection() as db:
@@ -1796,6 +2070,7 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
                 "intent": result.get("intent"),
                 "rewritten_query": result.get("rewritten_query"),
                 "verification": result.get("verification"),
+                "clarification_reason": result.get("clarification_reason"),
             },
             ensure_ascii=False,
         ) + "\n"
@@ -1833,7 +2108,7 @@ def search_global(q: str = "", user: dict = Depends(current_user)):
 def get_assistant_memory(user: dict = Depends(current_user)):
     """Return server-side conversation memory for the current user."""
     with connection() as db:
-        from eduvault.services import get_conversation_memory
+        from .services import get_conversation_memory
         return get_conversation_memory(db, user["code"])
 
 
@@ -1841,7 +2116,9 @@ def get_assistant_memory(user: dict = Depends(current_user)):
 def clear_assistant_memory(user: dict = Depends(current_user)):
     """Clear server-side conversation memory for the current user."""
     with connection() as db:
-        db.execute("DELETE FROM conversation_memory WHERE user_code=?", (user["code"],))
+        from .services import clear_conversation_memory
+        clear_conversation_memory(db, user["code"])
+        db.commit()
     return None
 
 
@@ -2088,11 +2365,34 @@ def users(user: dict = Depends(require_roles("admin"))):
         return rows(db.execute("SELECT code,name,role,department,active FROM users ORDER BY code").fetchall())
 
 
+@app.post("/api/admin/users/import/preview")
+async def preview_users_import(request: Request, user: dict = Depends(require_roles("admin"))):
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "File người dùng rỗng.")
+    filename = request.headers.get("X-Filename") or "users.csv"
+    mime_type = request.headers.get("Content-Type", "text/csv")
+    try:
+        with transaction() as db:
+            return preview_user_import(db, user, filename, raw, mime_type)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/admin/users/import/confirm")
+def confirm_users_import(payload: UserImportConfirmInput, user: dict = Depends(require_roles("admin"))):
+    try:
+        with transaction() as db:
+            return confirm_user_import(db, user, [item.model_dump() for item in payload.rows])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.post("/api/admin/users", status_code=201)
 def create_user(payload: UserInput, user: dict = Depends(require_roles("admin"))):
     with transaction() as db:
         try:
-            db.execute("INSERT INTO users VALUES(?,?,?,?,?,1)", (payload.code.upper(), payload.name, payload.role, payload.department, hash_secret(payload.password)))
+            db.execute("INSERT INTO users VALUES(?,?,?,?,?,1)", (payload.code.upper(), payload.name, payload.role, payload.department, hash_password(payload.password)))
         except Exception:
             raise HTTPException(409, "Mã người dùng đã tồn tại.")
         audit(db, user["code"], "user.create", "user", payload.code.upper())

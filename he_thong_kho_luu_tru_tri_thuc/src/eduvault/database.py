@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import math
 import os
 import re
 import sqlite3
+import secrets
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +47,67 @@ def now() -> str:
 def hash_secret(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
+try:
+    import bcrypt  # type: ignore
+except Exception:  # pragma: no cover - optional compatibility dependency
+    bcrypt = None
+
+PASSWORD_SCHEME = "pbkdf2_sha256"
+PASSWORD_ITERATIONS = int(os.getenv("PASSWORD_HASH_ITERATIONS", "390000"))
+LEGACY_SHA256_LENGTH = 64
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_SCHEME}${PASSWORD_ITERATIONS}${salt}${derived}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    stored = str(stored_hash or "").strip()
+    if not stored:
+        return False
+
+    if stored.startswith(f"{PASSWORD_SCHEME}$"):
+        try:
+            _, iterations_raw, salt, expected = stored.split("$", 3)
+            iterations = int(iterations_raw)
+        except ValueError:
+            return False
+        derived = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        ).hex()
+        return hmac.compare_digest(derived, expected)
+
+    # Accept bcrypt hashes written by earlier v4 revisions, then rehash on login.
+    if stored.startswith("$2") and bcrypt is not None:
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
+        except ValueError:
+            return False
+
+    return hmac.compare_digest(hash_secret(password), stored)
+
+
+def password_needs_rehash(stored_hash: str) -> bool:
+    stored = str(stored_hash or "").strip()
+    if not stored.startswith(f"{PASSWORD_SCHEME}$"):
+        return True
+
+    try:
+        _, iterations_raw, salt, digest = stored.split("$", 3)
+        iterations = int(iterations_raw)
+    except ValueError:
+        return True
+    return iterations < PASSWORD_ITERATIONS or len(salt) < 16 or len(digest) < LEGACY_SHA256_LENGTH
+
 
 INSECURE_SECRET_VALUES = {
     "change-me",
@@ -51,18 +116,16 @@ INSECURE_SECRET_VALUES = {
     "eduvault-demo-secret",
     "eduvault-demo-key-change-before-production",
     "ADMIN",
-    "GV001",
     "GVNEW",
-    "TBM01",
 }
 
 
 def required_secret(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        if name.startswith("EDUVAULT_SEED_PASSWORD_"):
-            return name.replace("EDUVAULT_SEED_PASSWORD_", "")
-        return "default-fallback-secret-2026"
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    if value in INSECURE_SECRET_VALUES:
+        raise RuntimeError(f"Insecure demo value is not allowed for environment variable: {name}")
     return value
 
 
@@ -82,9 +145,10 @@ class MySQLConnection:
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
+            connect_timeout=int(os.getenv("MYSQL_CONNECT_TIMEOUT_SECONDS", "3")),
         )
 
-    def execute(self, sql: str, params=()):
+    def _prepare_sql(self, sql: str) -> str:
         sql = sql.replace("INSERT OR IGNORE", "INSERT IGNORE")
         sql = sql.replace("policies(key,value,updated_at)", "policies(`key`,value,updated_at)")
         sql = re.sub(r"\bWHERE key=", "WHERE `key`=", sql)
@@ -96,9 +160,18 @@ class MySQLConnection:
             sql,
             flags=re.IGNORECASE | re.DOTALL,
         )
-        sql = sql.replace("?", "%s")
+        return sql.replace("?", "%s")
+
+    def execute(self, sql: str, params=()):
+        sql = self._prepare_sql(sql)
         cursor = self.raw.cursor()
         cursor.execute(sql, params)
+        return cursor
+
+    def executemany(self, sql: str, seq_of_params):
+        sql = self._prepare_sql(sql)
+        cursor = self.raw.cursor()
+        cursor.executemany(sql, seq_of_params)
         return cursor
 
     def executescript(self, script: str):
@@ -118,6 +191,47 @@ class MySQLConnection:
         self.raw.close()
 
 
+def _mysql_retryable(exc: Exception) -> bool:
+    try:
+        import pymysql
+    except Exception:
+        return False
+    if isinstance(exc, pymysql.err.OperationalError):
+        code = exc.args[0] if exc.args else None
+        return code in {2003, 2006, 2013, 1042}
+    return False
+
+
+def connect_mysql_with_retry():
+    max_wait_seconds = float(os.getenv("MYSQL_STARTUP_MAX_WAIT_SECONDS", "45"))
+    base_delay_seconds = float(os.getenv("MYSQL_STARTUP_BACKOFF_BASE_SECONDS", "0.5"))
+    max_delay_seconds = float(os.getenv("MYSQL_STARTUP_BACKOFF_MAX_SECONDS", "5"))
+    deadline = time.monotonic() + max_wait_seconds
+    attempt = 0
+    last_error: Exception | None = None
+
+    while True:
+        try:
+            connection = MySQLConnection()
+            if attempt > 0:
+                print(f"MySQL became available after {attempt + 1} attempts.")
+            return connection
+        except Exception as exc:
+            if not _mysql_retryable(exc):
+                raise
+            last_error = exc
+            now_monotonic = time.monotonic()
+            if now_monotonic >= deadline:
+                raise last_error
+            delay = min(base_delay_seconds * math.pow(2, attempt), max_delay_seconds)
+            remaining = max(0.0, deadline - now_monotonic)
+            sleep_for = min(delay, remaining)
+            if attempt == 0:
+                print("Waiting for MySQL to accept backend connections...")
+            time.sleep(sleep_for)
+            attempt += 1
+
+
 def connect():
     global _ACTIVE_PROVIDER
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,11 +240,11 @@ def connect():
     configured = os.getenv("DATABASE_PROVIDER", "sqlite").strip().lower()
     if configured == "mysql" and _ACTIVE_PROVIDER != "sqlite-fallback":
         try:
-            connection = MySQLConnection()
+            connection = connect_mysql_with_retry()
             _ACTIVE_PROVIDER = "mysql"
             return connection
         except Exception:
-            allow_fallback = os.getenv("DATABASE_FALLBACK_SQLITE", "true").strip().lower() in {"1", "true", "yes", "on"}
+            allow_fallback = os.getenv("DATABASE_FALLBACK_SQLITE", "false").strip().lower() in {"1", "true", "yes", "on"}
             if not allow_fallback:
                 raise
             _ACTIVE_PROVIDER = "sqlite-fallback"
@@ -494,6 +608,22 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   FOREIGN KEY(user_code) REFERENCES users(code)
 );
+CREATE TABLE IF NOT EXISTS desktop_sync_folders (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, folder_path TEXT NOT NULL,
+  folder_label TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(user_code, folder_path),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS desktop_agent_devices (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, device_id TEXT NOT NULL,
+  app_version TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'offline',
+  connection_status TEXT NOT NULL DEFAULT 'Offline', watch_folders_json TEXT NOT NULL DEFAULT '[]',
+  last_sync_at TEXT, last_seen_at TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(user_code, device_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 CREATE TABLE IF NOT EXISTS document_classification_tickets (
   id TEXT PRIMARY KEY, upload_task_id TEXT NOT NULL, user_code TEXT NOT NULL,
   filename TEXT NOT NULL, suggested_specialization_id TEXT, suggested_specialization TEXT,
@@ -530,6 +660,34 @@ CREATE TABLE IF NOT EXISTS search_feedback (
   reason TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
   FOREIGN KEY(user_code) REFERENCES users(code)
 );
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+  session_id TEXT PRIMARY KEY, user_code TEXT NOT NULL UNIQUE, state_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL, expires_at TEXT, created_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS assistant_turns (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_code TEXT NOT NULL,
+  question TEXT NOT NULL, retrieval_query TEXT NOT NULL, answer TEXT NOT NULL,
+  intent TEXT NOT NULL, current_page TEXT NOT NULL DEFAULT '',
+  entities_json TEXT NOT NULL DEFAULT '{}', citations_json TEXT NOT NULL DEFAULT '[]',
+  clarification_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES assistant_sessions(session_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS assistant_entities (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_code TEXT NOT NULL,
+  entity_type TEXT NOT NULL, entity_value TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'conversation',
+  confidence REAL NOT NULL DEFAULT 1.0, updated_at TEXT NOT NULL, expires_at TEXT,
+  FOREIGN KEY(session_id) REFERENCES assistant_sessions(session_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS assistant_tasks (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, user_code TEXT NOT NULL,
+  task_type TEXT NOT NULL, status TEXT NOT NULL, constraints_json TEXT NOT NULL DEFAULT '[]',
+  state_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES assistant_sessions(session_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 CREATE TABLE IF NOT EXISTS conversation_memory (
   user_code TEXT PRIMARY KEY, short_term TEXT NOT NULL DEFAULT '[]',
   long_term TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL,
@@ -540,7 +698,7 @@ CREATE TABLE IF NOT EXISTS conversation_memory (
 MYSQL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
   code VARCHAR(30) PRIMARY KEY, name VARCHAR(120) NOT NULL, role VARCHAR(30) NOT NULL,
-  department VARCHAR(120) NOT NULL, password_hash VARCHAR(64) NOT NULL, active TINYINT NOT NULL DEFAULT 1
+  department VARCHAR(120) NOT NULL, password_hash VARCHAR(255) NOT NULL, active TINYINT NOT NULL DEFAULT 1
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS sessions (
   token VARCHAR(128) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL,
@@ -705,6 +863,25 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
   INDEX idx_upload_tasks_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code)
 ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS desktop_sync_folders (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, folder_path VARCHAR(1000) NOT NULL,
+  folder_path_hash CHAR(64) GENERATED ALWAYS AS (SHA2(LOWER(folder_path), 256)) STORED,
+  folder_label VARCHAR(255) NOT NULL DEFAULT '', enabled TINYINT NOT NULL DEFAULT 1,
+  created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY uq_desktop_sync_folder(user_code, folder_path_hash),
+  INDEX idx_desktop_sync_folder_user(user_code),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS desktop_agent_devices (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, device_id VARCHAR(120) NOT NULL,
+  app_version VARCHAR(40) NOT NULL DEFAULT '', status VARCHAR(30) NOT NULL DEFAULT 'offline',
+  connection_status VARCHAR(80) NOT NULL DEFAULT 'Offline', watch_folders_json LONGTEXT NOT NULL,
+  last_sync_at VARCHAR(40), last_seen_at VARCHAR(40) NOT NULL, last_error TEXT NOT NULL,
+  created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY uq_desktop_agent_device(user_code, device_id),
+  INDEX idx_desktop_agent_user(user_code),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS document_classification_tickets (
   id VARCHAR(64) PRIMARY KEY, upload_task_id VARCHAR(64) NOT NULL, user_code VARCHAR(30) NOT NULL,
   filename TEXT NOT NULL, suggested_specialization_id VARCHAR(64), suggested_specialization VARCHAR(200),
@@ -740,6 +917,42 @@ CREATE TABLE IF NOT EXISTS search_feedback (
   id VARCHAR(64) PRIMARY KEY, trace_id VARCHAR(64), user_code VARCHAR(30) NOT NULL, rating VARCHAR(30) NOT NULL,
   reason VARCHAR(80) NOT NULL DEFAULT '', detail TEXT NOT NULL, created_at VARCHAR(40) NOT NULL,
   INDEX idx_search_feedback_trace(trace_id), INDEX idx_search_feedback_user(user_code),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+  session_id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL UNIQUE, state_json LONGTEXT NOT NULL,
+  updated_at VARCHAR(40) NOT NULL, expires_at VARCHAR(40), created_at VARCHAR(40) NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS assistant_turns (
+  id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(64) NOT NULL, user_code VARCHAR(30) NOT NULL,
+  question LONGTEXT NOT NULL, retrieval_query LONGTEXT NOT NULL, answer LONGTEXT NOT NULL,
+  intent VARCHAR(80) NOT NULL, current_page VARCHAR(255) NOT NULL DEFAULT '',
+  entities_json LONGTEXT NOT NULL, citations_json LONGTEXT NOT NULL,
+  clarification_reason VARCHAR(120) NOT NULL DEFAULT '', created_at VARCHAR(40) NOT NULL,
+  INDEX idx_assistant_turns_session(session_id), INDEX idx_assistant_turns_user(user_code),
+  FOREIGN KEY(session_id) REFERENCES assistant_sessions(session_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS assistant_entities (
+  id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(64) NOT NULL, user_code VARCHAR(30) NOT NULL,
+  entity_type VARCHAR(80) NOT NULL, entity_value LONGTEXT NOT NULL, source VARCHAR(80) NOT NULL DEFAULT 'conversation',
+  confidence DOUBLE NOT NULL DEFAULT 1.0, updated_at VARCHAR(40) NOT NULL, expires_at VARCHAR(40),
+  INDEX idx_assistant_entities_session(session_id), INDEX idx_assistant_entities_user(user_code),
+  FOREIGN KEY(session_id) REFERENCES assistant_sessions(session_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS assistant_tasks (
+  id VARCHAR(64) PRIMARY KEY, session_id VARCHAR(64) NOT NULL, user_code VARCHAR(30) NOT NULL,
+  task_type VARCHAR(80) NOT NULL, status VARCHAR(40) NOT NULL, constraints_json LONGTEXT NOT NULL,
+  state_json LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  INDEX idx_assistant_tasks_session(session_id), INDEX idx_assistant_tasks_user(user_code),
+  FOREIGN KEY(session_id) REFERENCES assistant_sessions(session_id),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS conversation_memory (
+  user_code VARCHAR(30) PRIMARY KEY, short_term LONGTEXT NOT NULL,
+  long_term LONGTEXT NOT NULL, updated_at VARCHAR(40) NOT NULL,
   FOREIGN KEY(user_code) REFERENCES users(code)
 ) ENGINE=InnoDB;
 """
@@ -800,6 +1013,12 @@ def init_database() -> None:
                 db.execute("ALTER TABLE documents ADD COLUMN course_id VARCHAR(64) NULL")
             if "document_type" not in doc_columns:
                 db.execute("ALTER TABLE documents ADD COLUMN document_type VARCHAR(80) NULL")
+            user_columns = {row["Field"]: row["Type"] for row in db.execute("SHOW COLUMNS FROM users").fetchall()}
+            password_hash_type = str(user_columns.get("password_hash", "")).lower()
+            if password_hash_type.startswith("varchar("):
+                match = re.search(r"varchar\((\d+)\)", password_hash_type)
+                if match and int(match.group(1)) < 255:
+                    db.execute("ALTER TABLE users MODIFY COLUMN password_hash VARCHAR(255) NOT NULL")
             access_columns = {row["Field"] for row in db.execute("SHOW COLUMNS FROM access_requests").fetchall()}
             if "source_rule_id" not in access_columns:
                 db.execute("ALTER TABLE access_requests ADD COLUMN source_rule_id VARCHAR(64) NULL")
@@ -807,14 +1026,43 @@ def init_database() -> None:
                 db.execute("ALTER TABLE access_requests ADD COLUMN source_rule_type VARCHAR(80) NULL")
             if "applied_at" not in access_columns:
                 db.execute("ALTER TABLE access_requests ADD COLUMN applied_at VARCHAR(40) NULL")
+            desktop_columns = {row["Field"] for row in db.execute("SHOW COLUMNS FROM desktop_sync_folders").fetchall()}
+            if "folder_path_hash" not in desktop_columns:
+                db.execute(
+                    "ALTER TABLE desktop_sync_folders "
+                    "ADD COLUMN folder_path_hash CHAR(64) GENERATED ALWAYS AS (SHA2(LOWER(folder_path), 256)) STORED "
+                    "AFTER folder_path"
+                )
+            desktop_indexes = rows(db.execute("SHOW INDEX FROM desktop_sync_folders").fetchall())
+            unique_folder_index_columns = [
+                item["Column_name"]
+                for item in sorted(
+                    (entry for entry in desktop_indexes if entry["Key_name"] == "uq_desktop_sync_folder"),
+                    key=lambda entry: int(entry["Seq_in_index"]),
+                )
+            ]
+            if unique_folder_index_columns != ["user_code", "folder_path_hash"]:
+                if unique_folder_index_columns:
+                    db.execute("ALTER TABLE desktop_sync_folders DROP INDEX uq_desktop_sync_folder")
+                db.execute(
+                    "ALTER TABLE desktop_sync_folders "
+                    "ADD UNIQUE KEY uq_desktop_sync_folder(user_code, folder_path_hash)"
+                )
+            if not any(entry["Key_name"] == "idx_desktop_sync_folder_user" for entry in desktop_indexes):
+                db.execute(
+                    "ALTER TABLE desktop_sync_folders "
+                    "ADD INDEX idx_desktop_sync_folder_user(user_code)"
+                )
+            desktop_agent_indexes = rows(db.execute("SHOW INDEX FROM desktop_agent_devices").fetchall())
+            if not any(entry["Key_name"] == "idx_desktop_agent_user" for entry in desktop_agent_indexes):
+                db.execute(
+                    "ALTER TABLE desktop_agent_devices "
+                    "ADD INDEX idx_desktop_agent_user(user_code)"
+                )
         for code, name, role, department in SEED_USERS:
             db.execute(
-                "UPDATE users SET name=?, role=?, department=?, password_hash=?, active=1 WHERE code=?",
-                (name, role, department, hash_secret(seed_password_for(code)), code)
-            )
-            db.execute(
                 "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, 1)",
-                (code, name, role, department, hash_secret(seed_password_for(code))),
+                (code, name, role, department, hash_password(seed_password_for(code))),
             )
         db.execute(
             "INSERT OR IGNORE INTO policies VALUES ('backup_321', ?, ?)",
@@ -838,7 +1086,7 @@ def init_database() -> None:
             "INSERT OR IGNORE INTO policies VALUES ('ai_prompts', ?, ?)",
             (json.dumps({
                 "metadata_instructions": "Phân loại tài liệu học thuật tiếng Việt. Chỉ trả JSON hợp lệ, không markdown.",
-                "answer_instructions": "Trả lời bằng tiếng Việt, chỉ dựa trên ngữ cảnh được cung cấp. Không bịa, không nêu nguồn trong thân câu trả lời vì giao diện hiển thị nguồn riêng. Nếu bằng chứng yếu, nói rõ chưa đủ căn cứ."
+                "answer_instructions": "LANGUAGE POLICY (BẮT BUỘC): luôn trả lời bằng tiếng Việt chuẩn Unicode có dấu, đúng chính tả; tuyệt đối không trả lời bằng tiếng Việt không dấu, không pha trộn tiếng Việt có dấu với tiếng Việt không dấu. Nếu phát hiện nội dung chuẩn bị trả lời bị mất dấu thì phải tự sửa thành tiếng Việt có dấu trước khi gửi. Nếu người dùng viết không dấu, vẫn phải trả lời bằng tiếng Việt có dấu. Chỉ dùng tiếng Anh khi người dùng yêu cầu, khi trích dẫn code, hoặc khi nhắc tới API, framework, thư viện và thuật ngữ kỹ thuật không nên dịch. Chỉ dựa trên ngữ cảnh được cung cấp. Không bịa, không nêu nguồn trong thân câu trả lời vì giao diện hiển thị nguồn riêng. Nếu bằng chứng yếu, nói rõ chưa đủ căn cứ."
             }, ensure_ascii=False), now()),
         )
         db.execute(
@@ -964,12 +1212,13 @@ SNAPSHOT_TABLES = [
     "access_requests", "audit_logs", "policies", "backup_logs", "courses",
     "transfers", "external_storages", "sync_logs", "cloud_connections",
     "oauth_states", "cloud_sync_logs",
-    "document_v2_state", "object_refs", "outbox_events", "upload_tasks", "document_classification_tickets", "document_processing_jobs",
+    "document_v2_state", "object_refs", "outbox_events", "upload_tasks", "desktop_sync_folders", "document_classification_tickets", "document_processing_jobs",
     "policy_files", "policy_nodes", "policy_rules", "policy_audit_logs", "policy_action_requests",
     "folder_nodes", "specializations", "lecturer_specializations", "lecturer_folder_nodes",
     "lecturer_assignment_batches", "lecturer_assignments", "lecturer_assignment_audit_logs", "lecturer_folder_permissions",
     "ops_restore_verifications", "automation_heartbeats",
     "query_traces", "search_feedback",
+    "assistant_sessions", "assistant_turns", "assistant_entities", "assistant_tasks", "conversation_memory",
 ]
 
 

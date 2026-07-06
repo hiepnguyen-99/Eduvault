@@ -9,6 +9,11 @@ export type UploadMetadata = {
   topic: string;
   doc_type: string;
   visibility: "public" | "private";
+  source_type?: "web" | "desktop_agent" | "cloud_sync" | "api_import";
+  source_path?: string;
+  device_id?: string;
+  source_sha256?: string;
+  observed_at?: string;
   folder_path?: string;
   folder_node_id?: string;
   existing_document_id?: string;
@@ -63,6 +68,19 @@ export type UploadTask = {
   updated_at: string;
 };
 
+export function labelForUploadSource(sourceType?: UploadMetadata["source_type"]) {
+  switch (sourceType) {
+    case "desktop_agent":
+      return "Desktop Agent";
+    case "cloud_sync":
+      return "Cloud Sync";
+    case "api_import":
+      return "API Import";
+    default:
+      return "Web Upload";
+  }
+}
+
 type UploadContextValue = {
   tasks: UploadTask[];
   startUpload: (file: File, metadata: UploadMetadata) => Promise<string>;
@@ -72,6 +90,20 @@ type UploadContextValue = {
 
 const UploadContext = createContext<UploadContextValue | null>(null);
 const CHUNK_SIZE = 5 * 1024 * 1024;
+
+function isSameTask(left: UploadTask, right: UploadTask) {
+  return left.id === right.id
+    && left.filename === right.filename
+    && left.mime_type === right.mime_type
+    && left.total_bytes === right.total_bytes
+    && left.uploaded_bytes === right.uploaded_bytes
+    && left.status === right.status
+    && left.document_id === right.document_id
+    && left.error === right.error
+    && left.created_at === right.created_at
+    && left.updated_at === right.updated_at
+    && JSON.stringify(left.metadata) === JSON.stringify(right.metadata);
+}
 
 export function UploadTaskProvider({ children }: { children: React.ReactNode }) {
   const { token, user } = useAuth();
@@ -86,12 +118,15 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
         : existing && existing.status === "uploading"
         ? { ...incoming, uploaded_bytes: Math.max(existing.uploaded_bytes, incoming.uploaded_bytes) }
         : incoming;
+      if (existing && isSameTask(existing, next)) return current;
       return [next, ...current.filter(task => task.id !== incoming.id)].slice(0, 20);
     });
   }, []);
 
   useEffect(() => {
-    if (!token || !user) {
+    // Upload tasks are available for cookie-backed sessions too, so only
+    // clear state when the authenticated user disappears entirely.
+    if (!user) {
       setTasks([]);
       files.current.clear();
       return;
@@ -115,7 +150,8 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
     return new Promise<UploadTask>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_URL}/api/uploads/${taskId}/file`);
-      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.withCredentials = true;
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
       xhr.setRequestHeader("X-Upload-Offset", String(offset));
       xhr.upload.onprogress = event => {
@@ -163,6 +199,7 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
         filename: file.name,
         mime_type: file.type || "application/octet-stream",
         total_bytes: file.size,
+        source_type: metadata.source_type || "web",
         ...metadata,
       }),
     }, token);

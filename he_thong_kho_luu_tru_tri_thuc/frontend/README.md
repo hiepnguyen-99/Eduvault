@@ -1,7 +1,5 @@
 # EduVault Enterprise Frontend
 
-<!-- Trigger redeploy to apply env changes -->
-
 Frontend Next.js 15 cho AI Knowledge Repository System, đã kết nối với backend
 FastAPI hiện có.
 

@@ -7,6 +7,7 @@ export type Permission =
   | "repository.view"
   | "repository.own"
   | "repository.upload"
+  | "ingestion.auto"
   | "policy.manage"
   | "users.manage"
   | "permissions.manage"
@@ -30,6 +31,7 @@ export type MenuItem = {
     | "dashboard"
     | "repository"
     | "upload"
+    | "ingestion"
     | "policy"
     | "users"
     | "permissions"
@@ -65,6 +67,7 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
   ADMIN: [
     "dashboard.view",
     "repository.view",
+    "ingestion.auto",
     "policy.manage",
     "users.manage",
     "permissions.manage",
@@ -78,6 +81,7 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
   HEAD_OF_DEPARTMENT: [
     "dashboard.view",
     "repository.view",
+    "ingestion.auto",
     "policy.manage",
     "cloud.sync",
     "transfer.manage",
@@ -89,6 +93,7 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
     "dashboard.view",
     "repository.own",
     "repository.upload",
+    "ingestion.auto",
     "cloud.sync",
     "versions.view",
     "chatbot.use",
@@ -97,6 +102,7 @@ export const ROLE_PERMISSIONS: Record<AppRole, Permission[]> = {
   NEW_LECTURER: [
     "dashboard.view",
     "cloud.sync",
+    "ingestion.auto",
     "handover.view",
     "knowledge.summary",
     "chatbot.use",
@@ -109,7 +115,8 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
     { label: "Vận hành", href: "/operations", permission: "audit.view", icon: "audit" },
     { label: "Tổng quan", href: "/dashboard", permission: "dashboard.view", icon: "dashboard" },
     { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
-    { label: "Kho tri thức", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Kho tài liệu", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Nhập liệu tự động", href: "/auto-ingestion", permission: "ingestion.auto", icon: "ingestion" },
     { label: "Thùng rác", href: "/trash", permission: "repository.view", icon: "trash" },
     { label: "Quản trị tri thức", href: "/policy", permission: "policy.manage", icon: "policy" },
     { label: "Quy tắc quản trị", href: "/governance-rules", permission: "policy.manage", icon: "policy" },
@@ -122,7 +129,8 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   HEAD_OF_DEPARTMENT: [
     { label: "Tổng quan", href: "/dashboard", permission: "dashboard.view", icon: "dashboard" },
     { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
-    { label: "Kho tri thức", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Kho tài liệu", href: "/repository", permission: "repository.view", icon: "repository" },
+    { label: "Nhập liệu tự động", href: "/auto-ingestion", permission: "ingestion.auto", icon: "ingestion" },
     { label: "Thùng rác", href: "/trash", permission: "repository.view", icon: "trash" },
     { label: "Quản trị tri thức", href: "/policy", permission: "policy.manage", icon: "policy" },
     { label: "Quy tắc quản trị", href: "/governance-rules", permission: "policy.manage", icon: "policy" },
@@ -134,7 +142,8 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   LECTURER: [
     { label: "Tổng quan", href: "/dashboard", permission: "dashboard.view", icon: "dashboard" },
     { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
-    { label: "Kho tri thức", href: "/repository", permission: "repository.own", icon: "repository" },
+    { label: "Kho tài liệu", href: "/repository", permission: "repository.own", icon: "repository" },
+    { label: "Nhập liệu tự động", href: "/auto-ingestion", permission: "ingestion.auto", icon: "ingestion" },
     { label: "Thùng rác", href: "/trash", permission: "repository.own", icon: "trash" },
     { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
     { label: "Phiên bản", href: "/versions", permission: "versions.view", icon: "versions" },
@@ -144,6 +153,7 @@ export const ROLE_MENUS: Record<AppRole, MenuItem[]> = {
   NEW_LECTURER: [
     { label: "Tổng quan", href: "/dashboard", permission: "dashboard.view", icon: "dashboard" },
     { label: "Tìm kiếm", href: "/search", permission: "dashboard.view", icon: "search" },
+    { label: "Nhập liệu tự động", href: "/auto-ingestion", permission: "ingestion.auto", icon: "ingestion" },
     { label: "Chuyển giao tri thức", href: "/knowledge-transfer", permission: "handover.view", icon: "handover" },
     { label: "Đồng bộ", href: "/backup", permission: "cloud.sync", icon: "backup" },
     { label: "Trợ lý AI", href: "/assistant", permission: "chatbot.use", icon: "chatbot" },
@@ -156,6 +166,7 @@ export const ROUTE_PERMISSIONS: Array<{ pattern: RegExp; permission: Permission 
   { pattern: /^\/dashboard(?:\/.*)?$/, permission: "dashboard.view" },
   { pattern: /^\/support(?:\/.*)?$/, permission: "dashboard.view" },
   { pattern: /^\/search(?:\/.*)?$/, permission: "dashboard.view" },
+  { pattern: /^\/auto-ingestion(?:\/.*)?$/, permission: "ingestion.auto" },
   { pattern: /^\/repository(?:\/.*)?$/, permission: "repository.view" },
   { pattern: /^\/repository(?:\/.*)?$/, permission: "repository.own" },
   { pattern: /^\/trash(?:\/.*)?$/, permission: "repository.view" },

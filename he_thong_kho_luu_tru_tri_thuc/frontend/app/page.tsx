@@ -5,7 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   BarChart3,
+  BookOpen,
   ChevronDown,
+  ChevronRight,
   FileClock,
   FolderKanban,
   GraduationCap,
@@ -241,7 +243,7 @@ export default function HomePage() {
           {BG_IMAGES.map((img, idx) => (
             <div 
               key={img} 
-              className={`absolute inset-0 bg-cover bg-center transition-opacity duration-1000 ease-in-out ${idx === currentBgIndex ? "opacity-35" : "opacity-0"}`} 
+              className={`absolute inset-0 bg-cover bg-center transition-all duration-[1500ms] ease-in-out transform ${idx === currentBgIndex ? "opacity-35 scale-100" : "opacity-0 scale-105"}`} 
               style={{ backgroundImage: `url('${img}')` }}
             />
           ))}
@@ -251,8 +253,8 @@ export default function HomePage() {
         <Reveal className="relative z-10 mx-auto max-w-5xl text-white">
           <div className="max-w-4xl text-center md:text-left">
             <h1 className="text-4xl font-black leading-tight tracking-tight md:text-6xl">
-              Kho lưu trữ dữ liệu
-              <span className="block text-cyan-100">Khoa Công nghệ Thông tin</span>
+              <span className="drop-shadow-md text-white">Kho lưu trữ dữ liệu</span>
+              <span className="block mt-2 text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 to-sky-300 drop-shadow-sm">Khoa Công nghệ Thông tin</span>
             </h1>
             <div className="mt-12 flex flex-wrap gap-3 justify-center md:justify-start">
               <Link href="/repository" className="btn-primary h-11 rounded-lg bg-white px-5 text-[#102451] hover:border-white hover:bg-cyan-100">
@@ -270,7 +272,7 @@ export default function HomePage() {
         <div className="mx-auto max-w-6xl space-y-12">
           {/* Top text row */}
           <Reveal className="max-w-4xl space-y-6" delay={100}>
-            <h2 className="text-3xl font-black tracking-tight text-[var(--text)] md:text-4xl">
+            <h2 className="text-3xl font-black tracking-tight text-[var(--text)] drop-shadow-sm md:text-4xl">
               Tiên phong kiến tạo & chuyển giao tri thức số
             </h2>
             <div className="grid gap-6 md:grid-cols-2">
@@ -347,7 +349,7 @@ export default function HomePage() {
       <section className="bg-[var(--bg)] px-4 py-12 md:px-8 lg:px-12">
         <div className="mx-auto max-w-7xl">
           <Reveal className="mb-6 max-w-3xl">
-            <h2 className="text-2xl font-black tracking-tight text-[var(--text)] md:text-3xl">Tổng quan chức năng</h2>
+            <h2 className="text-2xl font-black tracking-tight text-[var(--text)] drop-shadow-sm md:text-3xl">Tổng quan chức năng</h2>
           </Reveal>
           <div className="feature-grid">
             {features.map((feature, index) => (
@@ -380,49 +382,139 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section id="huong-dan-section" className="bg-white px-4 py-12 dark:bg-slate-950 md:px-8 lg:px-12">
-        <div className="mx-auto max-w-4xl">
-          <Reveal className="mb-6 text-center">
-            <h2 className="text-2xl font-black text-[var(--text)]">Hướng dẫn sử dụng chi tiết</h2>
+      <section id="huong-dan-section" className="bg-[#f1f5f9] px-4 py-20 dark:bg-[#0a0f1c] border-t border-[var(--border)] overflow-hidden relative">
+        <style dangerouslySetInnerHTML={{ __html: `
+          @keyframes pageTurn {
+            0% { transform: perspective(1500px) rotateY(30deg); opacity: 0; transform-origin: left center; }
+            100% { transform: perspective(1500px) rotateY(0deg); opacity: 1; transform-origin: left center; }
+          }
+          .animate-page-turn {
+            animation: pageTurn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+          }
+          .book-shadow {
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 -5px 20px -10px rgba(0,0,0,0.1);
+          }
+          .book-spine-gradient {
+            background: linear-gradient(to right, 
+              rgba(0,0,0,0.02) 0%, 
+              rgba(0,0,0,0.1) 20%, 
+              rgba(0,0,0,0.15) 50%, 
+              rgba(0,0,0,0.1) 80%, 
+              rgba(0,0,0,0.02) 100%
+            );
+          }
+          .dark .book-spine-gradient {
+            background: linear-gradient(to right, 
+              rgba(255,255,255,0.02) 0%, 
+              rgba(255,255,255,0.05) 20%, 
+              rgba(255,255,255,0.08) 50%, 
+              rgba(255,255,255,0.05) 80%, 
+              rgba(255,255,255,0.02) 100%
+            );
+          }
+        `}} />
+
+        <div className="mx-auto max-w-5xl">
+          <Reveal className="mb-12 text-center">
+            <h2 className="text-3xl font-black text-[var(--text)] drop-shadow-md md:text-5xl">Cẩm Nang Điện Tử</h2>
+            <p className="mt-4 text-[var(--muted)] max-w-2xl mx-auto text-lg font-medium">Mở sách để khám phá chi tiết các chức năng. Trải nghiệm tương tác sinh động, trực quan.</p>
           </Reveal>
 
-          <div className="space-y-5">
-            {features.filter(f => f.id === activeGuideId).map((feature) => (
-              <Reveal key={feature.id} delay={0}>
-                <article className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-sm">
-                  <div className="flex w-full items-center gap-4 p-5 border-b border-[var(--border)]">
-                    <span className="text-[var(--text)] shrink-0">
-                      {feature.icon}
+          {/* Cuốn sách */}
+          <div className="relative mx-auto max-w-[920px] rounded-[18px] book-shadow bg-[#fdfdfd] dark:bg-slate-900 flex flex-col md:flex-row min-h-[560px] border border-black/5 dark:border-white/10">
+            {/* Bìa sách / Spine (Gáy sách) */}
+            <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-12 book-spine-gradient z-20 pointer-events-none hidden md:block"></div>
+            
+            {/* Đường kẻ nếp gấp giữa */}
+            <div className="absolute top-0 bottom-0 left-1/2 w-[1px] bg-black/10 dark:bg-white/10 z-20 pointer-events-none hidden md:block"></div>
+
+            {/* TRANG BÊN TRÁI: MỤC LỤC */}
+            <div className="w-full md:w-1/2 p-6 md:p-9 relative z-10 bg-gradient-to-l from-[#f1f5f9]/50 to-white dark:from-slate-800/50 dark:to-slate-900 rounded-l-[18px]">
+              <div className="flex items-center gap-3 mb-6 pb-4 border-b-2 border-amber-500/30">
+                <div className="w-9 h-9 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shadow-sm">
+                  <BookOpen size={18} />
+                </div>
+                <h3 className="text-[1.8rem] font-serif font-black text-[#102451] dark:text-amber-400">Mục lục</h3>
+              </div>
+              
+              <nav className="space-y-2.5 relative z-30">
+                {features.map((f, i) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setActiveGuideId(f.id)}
+                    className={`w-full text-left px-4 py-3 rounded-xl flex items-center gap-3 transition-all duration-300 group ${
+                      activeGuideId === f.id 
+                        ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-[1.02] -translate-y-0.5" 
+                        : "text-[var(--text)] hover:bg-slate-100 dark:hover:bg-slate-800 border border-transparent font-medium"
+                    }`}
+                  >
+                    <span className={`shrink-0 flex items-center justify-center w-7 h-7 rounded-full text-sm transition-all duration-300 font-bold ${activeGuideId === f.id ? "bg-white/20 text-white" : "bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400 group-hover:scale-110"}`}>
+                      {i + 1}
                     </span>
-                    <div>
-                      <span className="block text-base font-black text-[var(--text)]">{feature.title}</span>
-                      <span className="mt-1 block text-sm leading-6 text-[var(--muted)]">{feature.short}</span>
+                    <span className="text-sm font-bold">{f.title}</span>
+                    {activeGuideId === f.id && <ChevronRight size={16} className="ml-auto text-white/80 animate-pulse" />}
+                  </button>
+                ))}
+              </nav>
+
+              {/* Trang trí góc trang giấy */}
+              <div className="absolute bottom-6 left-8 text-xs font-bold text-slate-400 tracking-widest">TRANG 1</div>
+            </div>
+
+            {/* TRANG BÊN PHẢI: NỘI DUNG */}
+            <div className="w-full md:w-1/2 relative z-10 bg-gradient-to-r from-[#f1f5f9]/50 to-white dark:from-slate-800/50 dark:to-slate-900 rounded-r-[18px] perspective-[1500px]">
+              {features.filter(f => f.id === activeGuideId).map((feature) => (
+                <div key={feature.id} className="w-full h-full flex flex-col animate-page-turn origin-left">
+                  <div className="p-6 md:p-9 flex-1 flex flex-col">
+                    {/* Header */}
+                    <div className="mb-6">
+                       <span className="inline-block px-3 py-1 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300 text-[11px] font-black tracking-wider uppercase mb-3">
+                         {feature.title}
+                       </span>
+                       <h3 className="text-[1.9rem] md:text-[2.2rem] font-black text-[#102451] dark:text-white leading-tight">{feature.short}</h3>
                     </div>
-                  </div>
-                  <div className="p-5 space-y-6">
-                    <div>
-                      <p className="text-sm leading-7 text-[var(--muted)]">{feature.detail}</p>
+
+                    <div className="prose prose-slate dark:prose-invert max-w-none mb-6">
+                       <p className="text-[15px] leading-relaxed font-medium text-slate-600 dark:text-slate-300">
+                         {feature.detail}
+                       </p>
                     </div>
-                    <div className="space-y-3">
-                      <h4 className="text-xs font-bold text-[var(--muted)] uppercase tracking-wider">Quy trình thực hiện:</h4>
-                      <div className="grid gap-3 md:grid-cols-3">
+
+                    <div className="space-y-4 flex-1">
+                      <h4 className="text-sm font-black text-slate-400 uppercase tracking-widest flex items-center gap-3">
+                         <span className="w-6 h-px bg-slate-300 dark:bg-slate-700"></span>
+                         Thao tác thực hiện
+                         <span className="flex-1 h-px bg-slate-300 dark:bg-slate-700"></span>
+                      </h4>
+                      
+                      <div className="space-y-4">
                         {feature.steps.map((step, idx) => (
-                          <div key={idx} className="rounded-lg border border-[var(--border)] bg-[var(--soft)] p-4">
-                            <span className="inline-block text-[11px] font-black text-[#C92027] mb-2">BƯỚC {idx + 1}</span>
-                            <p className="text-xs font-semibold leading-5 text-[var(--text)]">{step.replace(/^Bước \d+:\s*/, "")}</p>
+                          <div key={idx} className="flex gap-4 items-start group">
+                            <div className="shrink-0 flex items-center justify-center w-7 h-7 rounded-full text-sm bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold border-2 border-white dark:border-slate-900 shadow-sm group-hover:bg-amber-100 group-hover:text-amber-600 transition-colors">
+                              {idx + 1}
+                            </div>
+                            <p className="text-[13px] pt-1 leading-relaxed text-[var(--text)] group-hover:text-amber-700 dark:group-hover:text-amber-400 transition-colors font-medium">
+                              {step.replace(/^Bước \d+:\s*/, "")}
+                            </p>
                           </div>
                         ))}
                       </div>
                     </div>
-                    <div className="pt-2 border-t border-[var(--border)]">
-                      <Link href={feature.href} className="inline-flex items-center gap-1 text-sm font-bold text-[#102451] hover:text-[#C92027] dark:text-cyan-200">
-                        Mở chức năng này <ArrowRight size={14} />
+
+                    {/* Footer của trang (Nút hành động) */}
+                    <div className="mt-6 pt-5 border-t-2 border-dashed border-slate-200 dark:border-slate-800">
+                      <Link href={feature.href} className="w-full flex items-center justify-center gap-3 rounded-xl bg-gradient-to-r from-[#102451] to-blue-800 px-5 py-3.5 text-sm font-bold text-white transition-transform hover:scale-[1.02] hover:shadow-xl dark:from-blue-700 dark:to-cyan-600">
+                        {feature.icon}
+                        Truy cập chức năng
                       </Link>
                     </div>
                   </div>
-                </article>
-              </Reveal>
-            ))}
+
+                  {/* Trang trí góc trang giấy */}
+                  <div className="absolute bottom-6 right-8 text-xs font-bold text-slate-400 tracking-widest">TRANG 2</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </section>

@@ -14,7 +14,6 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
-const SESSION_KEY = "eduvault_session";
 const AUTH_BOOT_TIMEOUT_MS = 5000;
 
 function normalizeUser(user: User): User {
@@ -31,35 +30,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const savedSession = sessionStorage.getItem(SESSION_KEY);
-    if (savedSession) {
-      try {
-        const parsed = JSON.parse(savedSession) as { token: string; user: User };
-        if (parsed.token && parsed.user) {
-          setToken(parsed.token);
-          setUser(normalizeUser(parsed.user));
-        }
-      } catch {
-        sessionStorage.removeItem(SESSION_KEY);
-      }
-    }
-    const stored = localStorage.getItem("eduvault_token") || "";
-    if (!stored) {
+    const savedToken = localStorage.getItem("eduvault_token") || "";
+    setToken(savedToken);
+
+    if (!savedToken) {
+      setUser(null);
       setReady(true);
       return;
     }
+
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), AUTH_BOOT_TIMEOUT_MS);
-    api<DashboardData>("/api/dashboard", { signal: controller.signal }, stored)
+    api<DashboardData>("/api/dashboard", { signal: controller.signal }, savedToken)
       .then((data) => {
         const nextUser = normalizeUser(data.user);
-        setToken(stored);
         setUser(nextUser);
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: stored, user: nextUser }));
       })
       .catch(() => {
         localStorage.removeItem("eduvault_token");
-        sessionStorage.removeItem(SESSION_KEY);
         setToken("");
         setUser(null);
       })
@@ -76,7 +64,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     const nextUser = normalizeUser(result.user);
     localStorage.setItem("eduvault_token", result.token);
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ token: result.token, user: nextUser }));
     setToken(result.token);
     setUser(nextUser);
     setReady(true);
@@ -87,7 +74,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await api("/api/auth/logout", { method: "POST" }, token);
     } finally {
       localStorage.removeItem("eduvault_token");
-      sessionStorage.removeItem(SESSION_KEY);
       setToken("");
       setUser(null);
     }
@@ -99,7 +85,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         localStorage.removeItem("eduvault_token");
-        sessionStorage.removeItem(SESSION_KEY);
         setToken("");
         setUser(null);
       }

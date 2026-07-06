@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw, ScrollText } from "lucide-react";
+import { RefreshCw, ScrollText, Table } from "lucide-react";
 import { PermissionGuard } from "@/components/permission-guard";
 import { useAuth } from "@/components/auth-provider";
 import { Audit, formatDate } from "@/lib/api";
@@ -29,13 +29,59 @@ type AuditLogsResponse = {
 const emptyResponse: AuditLogsResponse = {
   items: [],
   page: 1,
-  page_size: 20,
+  page_size: 10,
   total: 0,
   has_next: false,
   has_prev: false,
   filters: { actor: "", action: "", resource_type: "", query: "" },
   options: { actions: [], resource_types: [] },
 };
+
+function actionLabel(action: string) {
+  const labels: Record<string, string> = {
+    "auth.login": "Đăng nhập",
+    "auth.logout": "Đăng xuất",
+    "rag.ask": "Hỏi đáp trợ lý",
+    "document.upload": "Tải tài liệu lên",
+    "document.delete": "Xóa tài liệu",
+    "document.update": "Cập nhật tài liệu",
+    "document.sync": "Đồng bộ tài liệu",
+    "policy.create": "Tạo chính sách",
+    "policy.update": "Cập nhật chính sách",
+    "policy.delete": "Xóa chính sách",
+    "policy.activate": "Kích hoạt chính sách",
+    "user.create": "Tạo người dùng",
+    "user.update": "Cập nhật người dùng",
+    "user.delete": "Xóa người dùng",
+    "folder.create": "Tạo thư mục",
+    "folder.update": "Cập nhật thư mục",
+    "folder.delete": "Xóa thư mục",
+    "permission.grant": "Cấp quyền",
+    "permission.revoke": "Thu hồi quyền",
+  };
+  return labels[action] || action;
+}
+
+function resourceLabel(type: string | null | undefined, id: string | null | undefined) {
+  if (!type) return "";
+  const t = type.replace("session", "Phiên làm việc").replace("query", "Hỏi đáp").replace("document", "Tài liệu");
+  return id ? `${t}/${id}` : t;
+}
+
+function scopeLabel(scope: unknown) {
+  if (scope === "public_or_owned") return "Công khai / của tôi";
+  if (scope === "personal") return "Cá nhân";
+  if (scope === "global") return "Toàn cục";
+  return typeof scope === "string" ? scope : "";
+}
+
+function intentLabel(intent: unknown) {
+  if (intent === "document_retrieval") return "Tra cứu tài liệu";
+  if (intent === "statistics_query") return "Truy vấn thống kê";
+  if (intent === "out_of_scope") return "Ngoài phạm vi";
+  if (intent === "greetings") return "Chào hỏi";
+  return typeof intent === "string" ? intent : "";
+}
 
 function AuditLogsContent() {
   const { request } = useAuth();
@@ -51,7 +97,7 @@ function AuditLogsContent() {
     if (filters.resource_type.trim()) params.set("resource_type", filters.resource_type.trim());
     if (filters.query.trim()) params.set("q", filters.query.trim());
     params.set("page", String(filters.page));
-    params.set("page_size", "20");
+    params.set("page_size", "10");
     return params.toString();
   }, [filters]);
 
@@ -79,12 +125,12 @@ function AuditLogsContent() {
     <PageHeader eyebrow="Vận hành" title="Nhật ký hệ thống" description="Theo dõi hành động quản trị, tải lên, chính sách, truy cập và sự kiện vận hành theo bộ lọc riêng." actions={<button className="btn-secondary" onClick={() => void load()}><RefreshCw size={15}/>Làm mới</button>}/>
     {error && <p className="mb-4 rounded bg-amber-50 p-3 text-xs text-amber-800">{error}</p>}
 
-    <Panel title="Bộ lọc nhật ký" description="Lọc theo người thực hiện, hành động, tài nguyên và từ khóa tự do.">
+    <Panel title="Bộ lọc audit" description="Lọc theo người thực hiện, hành động, tài nguyên và từ khóa tự do.">
       <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">
         <input className="field" placeholder="Mã người dùng" value={filters.actor} onChange={event => set("actor", event.target.value)} />
         <select className="field" value={filters.action} onChange={event => set("action", event.target.value)}>
           <option value="">Tất cả hành động</option>
-          {data.options.actions.map(item => <option key={item} value={item}>{item}</option>)}
+          {data.options.actions.map(item => <option key={item} value={item}>{actionLabel(item)}</option>)}
         </select>
         <select className="field" value={filters.resource_type} onChange={event => set("resource_type", event.target.value)}>
           <option value="">Tất cả tài nguyên</option>
@@ -110,41 +156,67 @@ function AuditLogsContent() {
       </div>
     </div>
 
-    <Panel title="Dòng thời gian nhật ký" description={loading ? "Đang tải..." : "Sự kiện mới nhất được sắp xếp giảm dần theo thời gian"} className="mt-5">
-      <div className="space-y-3 p-4">
-        {data.items.map(item => (
-          <div key={item.id} className="rounded-lg border border-[var(--border)] p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="badge badge-blue">{item.action}</span>
-              <strong className="text-sm">{item.actor_code}</strong>
-              <span className="muted text-xs">{item.resource_type}{item.resource_id ? `/${item.resource_id}` : ""}</span>
-              <span className="ml-auto text-[11px] text-[var(--muted)]">{formatDate(item.created_at)}</span>
-            </div>
-            <pre className="mt-2 overflow-x-auto rounded bg-[var(--soft)] p-3 text-[11px] leading-5 text-[var(--text)]">{JSON.stringify(item.detail || {}, null, 2)}</pre>
-          </div>
-        ))}
-        {!data.items.length && <p className="muted py-6 text-center text-xs">Không có sự kiện nào phù hợp bộ lọc hiện tại.</p>}
-      </div>
-    </Panel>
 
-    <Panel title="Bảng nhật ký" className="mt-5">
-      <div className="table-shell">
-        <table className="data-table">
-          <thead><tr><th>ID</th><th>Người thực hiện</th><th>Hành động</th><th>Tài nguyên</th><th>Thời gian</th></tr></thead>
-          <tbody>
-            {data.items.map(item => <tr key={item.id}><td>{item.id}</td><td>{item.actor_code}</td><td><strong>{item.action}</strong></td><td>{item.resource_type}{item.resource_id ? `/${item.resource_id}` : ""}</td><td>{formatDate(item.created_at)}</td></tr>)}
-            {!data.items.length && <tr><td colSpan={5} className="muted text-center">Không có dữ liệu.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-      <div className="flex items-center justify-between gap-3 border-t border-[var(--border)] p-4">
-        <span className="muted text-xs">Trang {data.page} · Tổng {data.total} sự kiện</span>
-        <div className="flex gap-2">
-          <button className="btn-secondary px-3 py-2 text-xs" disabled={!data.has_prev} onClick={() => set("page", filters.page - 1)}>Trang trước</button>
-          <button className="btn-secondary px-3 py-2 text-xs" disabled={!data.has_next} onClick={() => set("page", filters.page + 1)}>Trang sau</button>
-        </div>
-      </div>
-    </Panel>
+
+    {(() => {
+      const startIdx = (data.page - 1) * data.page_size + (data.items.length > 0 ? 1 : 0);
+      const endIdx = startIdx + data.items.length - (data.items.length > 0 ? 1 : 0);
+      const desc = data.total > 0 ? `Hiển thị ${startIdx}-${endIdx} / ${data.total} sự kiện` : "Không có sự kiện";
+
+      return (
+        <Panel 
+          title="Chi tiết hoạt động" 
+          icon={<Table size={16} />}
+          description={desc}
+          action={<button className="btn-secondary py-1.5 px-3 text-xs flex items-center" onClick={() => load()}><RefreshCw size={14} className="mr-1"/> Làm mới</button>}
+          className="mt-5"
+        >
+          <div className="table-shell">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>THỜI GIAN</th>
+                  <th>HÀNH ĐỘNG</th>
+                  <th>NGƯỜI THỰC HIỆN</th>
+                  <th>TÀI NGUYÊN</th>
+                  <th>CÂU HỎI</th>
+                  <th>CÂU TRẢ LỜI</th>
+                  <th>PHẠM VI</th>
+                  <th>MỤC ĐÍCH</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.items.map(item => {
+                  const detail = (item.detail || {}) as any;
+                  return (
+                    <tr key={item.id}>
+                      <td>{item.id}</td>
+                      <td>{formatDate(item.created_at)}</td>
+                      <td><strong>{actionLabel(item.action)}</strong></td>
+                      <td><strong>{item.actor_code}</strong></td>
+                      <td>{resourceLabel(item.resource_type, item.resource_id)}</td>
+                      <td className="max-w-[150px] truncate" title={detail.question}>{detail.question}</td>
+                      <td className="max-w-[150px] truncate" title={detail.answer}>{detail.answer}</td>
+                      <td>{scopeLabel(detail.scope)}</td>
+                      <td>{intentLabel(detail.intent)}</td>
+                    </tr>
+                  )
+                })}
+                {!data.items.length && <tr><td colSpan={9} className="muted text-center">Không có dữ liệu.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex items-center justify-between gap-3 border-t border-[var(--border)] p-4">
+            <span className="muted text-xs">Trang {data.page} · Tổng {data.total} sự kiện</span>
+            <div className="flex gap-2">
+              <button className="btn-secondary px-3 py-2 text-xs" disabled={!data.has_prev} onClick={() => set("page", filters.page - 1)}>Trang trước</button>
+              <button className="btn-secondary px-3 py-2 text-xs" disabled={!data.has_next} onClick={() => set("page", filters.page + 1)}>Trang sau</button>
+            </div>
+          </div>
+        </Panel>
+      );
+    })()}
   </div>;
 }
 

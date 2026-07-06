@@ -250,7 +250,7 @@ function typeLabel(value: string) {
     Specialization: "Nhóm chuyên môn",
     Lecturer: "Giảng viên",
     "Governance Rule": "Quy tắc quản trị",
-    Policy: "Chính sách",
+    Policy: "Ch?nh s?ch",
     "Policy Item": "Mục policy",
     Assignment: "Phân công",
     Audit: "Nhật ký",
@@ -266,7 +266,7 @@ function sourceLabel(value: string) {
     specializations: "Nhóm chuyên môn",
     users: "Người dùng",
     policy_rules: "Quy tắc",
-    policy_files: "Chính sách",
+    policy_files: "Ch?nh s?ch",
     lecturer_assignments: "Phân công",
     audit_logs: "Nhật ký",
   };

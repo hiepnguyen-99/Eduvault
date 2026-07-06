@@ -1,75 +1,76 @@
 "use client";
 
-import { useState } from "react";
-import type { ReactNode } from "react";
-import { ChevronDown, ChevronRight, Cloud, FileUp, Folder, FolderOpen, Save, Search, Shield, ShieldCheck, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Cloud, Download, HardDriveDownload, Save } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { useBackendData } from "@/lib/hooks";
-import { FolderNode, PolicyFile, ProfileSpecializations } from "@/lib/api";
+import { API_URL, DesktopAgentStatus, DesktopSyncFolder, DesktopSyncFoldersResponse } from "@/lib/api";
 import { PageHeader, Panel } from "@/components/ui";
 import { statusLabel } from "@/src/constants/ui-text";
 
-type Policy = { key: string; value: Record<string, unknown>; updated_at: string };
 type Storage = { id: string; name: string; provider: string; location: string; last_status: string };
-type MasterTree = { policy: PolicyFile | null; tree: FolderNode | null; message?: string };
+const emptyDesktopSync: DesktopSyncFoldersResponse = { folders: [] };
+const emptyAgentStatus: DesktopAgentStatus = {
+  installed: false,
+  online: false,
+  version: "1.0.0",
+  watch_folders: ["D:\\Teaching"],
+  last_sync: "",
+  last_seen_at: "",
+  connection_status: "Offline",
+  status: "offline",
+  status_text: "Desktop Agent is not installed.",
+  device_id: "",
+  last_error: "",
+};
 
-const emptyProfile: ProfileSpecializations = { policy: null, available: [], selected_ids: [] };
-const emptyMaster: MasterTree = { policy: null, tree: null };
+function formatStatusTime(value?: string) {
+  if (!value) return "Chưa có";
+  return new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+}
 
 export default function Settings() {
-  const { request, user } = useAuth();
-  const { data: policies, error } = useBackendData<Policy[]>("/api/admin/policies", []);
+  const { request } = useAuth();
   const { data: storages } = useBackendData<Storage[]>("/api/admin/storages", []);
-  const { data: policyFiles, reload: reloadPolicyFiles } = useBackendData<PolicyFile[]>("/api/policies", []);
-  const { data: masterTree, reload: reloadMasterTree } = useBackendData<MasterTree>("/api/admin/master-tree", emptyMaster);
-  const { data: profile, reload: reloadProfile } = useBackendData<ProfileSpecializations>("/api/profile/specializations", emptyProfile);
-  const [policyFile, setPolicyFile] = useState<File | null>(null);
-  const [policyTitle, setPolicyTitle] = useState("Chính sách học liệu khoa CNTT");
+  const { data: desktopSync, reload: reloadDesktopSync } = useBackendData<DesktopSyncFoldersResponse>("/api/desktop-sync/folders", emptyDesktopSync);
+  const { data: agentStatus, reload: reloadAgentStatus } = useBackendData<DesktopAgentStatus>("/api/desktop-agent/status", emptyAgentStatus);
+
   const [message, setMessage] = useState("");
-  const permission = policies.find(item => item.key === "permission_rules");
-  const assignedSpecializations = profile.available.filter(spec => profile.selected_ids.includes(spec.id));
+  const [watchFolder, setWatchFolder] = useState("D:\\Teaching");
+  const [savingFolder, setSavingFolder] = useState(false);
+  const [savedOnce, setSavedOnce] = useState(false);
 
-  async function uploadPolicy() {
-    if (!policyFile) return;
+  useEffect(() => {
+    const enabledFolder = (desktopSync.folders || []).find(item => item.enabled)?.folder_path;
+    setWatchFolder(enabledFolder || "D:\\Teaching");
+  }, [desktopSync.folders]);
+
+  const installerHref = useMemo(() => `${API_URL}/api/desktop-agent/installer`, []);
+  const effectiveWatchFolder = agentStatus.watch_folders[0] || watchFolder || "D:\\Teaching";
+  const hasSavedConfig = savedOnce || (desktopSync.folders?.length || 0) > 0;
+
+  async function saveWatchFolder() {
+    const normalized = watchFolder.trim() || "D:\\Teaching";
+    setSavingFolder(true);
     setMessage("");
     try {
-      await request("/api/policies/upload", {
-        method: "POST",
-        headers: {
-          "X-Filename": encodeURIComponent(policyFile.name),
-          "X-Title": encodeURIComponent(policyTitle),
-          "Content-Type": policyFile.type || "text/plain",
-        },
-        body: await policyFile.arrayBuffer(),
+      const payloadFolder: DesktopSyncFolder = {
+        folder_path: normalized,
+        folder_label: normalized.split(/[\\/]/).filter(Boolean).pop() || "Teaching",
+        enabled: true,
+      };
+      await request<DesktopSyncFoldersResponse>("/api/desktop-sync/folders", {
+        method: "PUT",
+        body: JSON.stringify({ folders: [payloadFolder] }),
       });
-      setPolicyFile(null);
-      await reloadPolicyFiles();
-      setMessage("Đã tải chính sách lên. Hãy kích hoạt chính sách để cập nhật cây thư mục chuẩn.");
+      setWatchFolder(normalized);
+      setSavedOnce(true);
+      setMessage("Đã lưu thư mục theo dõi. Nếu máy chưa có Desktop Agent, hãy tải và đăng nhập một lần.");
+      await Promise.all([reloadDesktopSync(), reloadAgentStatus()]);
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không tải được chính sách.");
-    }
-  }
-
-  async function activatePolicy(policyId: string) {
-    setMessage("");
-    try {
-      await request(`/api/policies/${policyId}/activate`, { method: "POST" });
-      await Promise.all([reloadPolicyFiles(), reloadMasterTree(), reloadProfile()]);
-      setMessage("Cây thư mục chuẩn đã được cập nhật theo chính sách đang áp dụng.");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không kích hoạt được chính sách.");
-    }
-  }
-
-  async function deletePolicy(policy: PolicyFile) {
-    if (!confirm(`Xóa chính sách "${policy.title}"?`)) return;
-    setMessage("");
-    try {
-      await request(`/api/policies/${policy.id}`, { method: "DELETE" });
-      await Promise.all([reloadPolicyFiles(), reloadMasterTree(), reloadProfile()]);
-      setMessage("Đã xóa chính sách.");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không xóa được chính sách.");
+      setMessage(err instanceof Error ? err.message : "Không lưu được thư mục theo dõi.");
+    } finally {
+      setSavingFolder(false);
     }
   }
 
@@ -78,144 +79,108 @@ export default function Settings() {
       <PageHeader
         eyebrow="Cài đặt hệ thống"
         title="Cấu hình hệ thống"
-        description="Quản lý chính sách, cây thư mục chuẩn và các cấu hình hệ thống."
+        description="Chọn thư mục mà Desktop Agent sẽ tự theo dõi trên máy của giảng viên."
         actions={<button className="btn-primary"><Save size={15}/>Đã kết nối</button>}
       />
-      {(error || message) && (
+
+      {message && (
         <p className="mb-4 rounded bg-amber-50 p-3 text-xs text-amber-800">
-          {message || `Chỉ quản trị viên truy cập được một số cấu hình: ${error}`}
+          {message}
         </p>
       )}
-      <div className="grid gap-5 xl:grid-cols-[1.2fr_.8fr]">
-        <Panel title="Tải chính sách và cây thư mục chuẩn" description="Quản trị viên tải chính sách lên, kích hoạt một bản duy nhất, hệ thống sinh cây chuẩn toàn khoa.">
-          <div className="space-y-4 p-4">
-            {user?.role === "admin" && (
-              <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                  <input className="field" value={policyTitle} onChange={event => setPolicyTitle(event.target.value)} placeholder="Tiêu đề chính sách"/>
-                  <label className="btn-secondary cursor-pointer">
-                    <FileUp size={15}/>{policyFile?.name || "Chọn tệp"}
-                    <input className="hidden" type="file" accept=".pdf,.docx,.txt,.json,.yaml,.yml" onChange={event => setPolicyFile(event.target.files?.[0] || null)}/>
-                  </label>
-                </div>
-                <button className="btn-primary mt-3" disabled={!policyFile} onClick={uploadPolicy}>Tải chính sách lên</button>
+
+      <Panel title="Kho lưu trữ ngoài" description="Phần này chỉ dùng để cập nhật trạng thái và đường dẫn kết nối tới các kho lưu trữ ngoài.">
+        <div className="space-y-3 p-4">
+          {storages.map(storage => (
+            <div key={storage.id} className="rounded-lg border border-[var(--border)] p-3">
+              <div className="flex items-center gap-2">
+                <Cloud size={15} className="text-blue-600"/>
+                <strong className="text-xs">{storage.name}</strong>
+                <span className="badge badge-green ml-auto">{statusLabel(storage.last_status)}</span>
               </div>
-            )}
-            <div className="space-y-2">
-              {policyFiles.map(policy => (
-                <div key={policy.id} className="rounded-lg border border-[var(--border)] p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Shield size={15} className="text-blue-600"/>
-                    <strong className="text-xs">{policy.title}</strong>
-                    <span className={`badge ${policy.status === "active" ? "badge-green" : "badge-amber"}`}>{statusLabel(policy.status)}</span>
-                    {user?.role === "admin" && (
-                      <span className="ml-auto flex gap-2">
-                        {policy.status !== "active" && <button className="btn-secondary px-2 py-1 text-[11px]" onClick={() => activatePolicy(policy.id)}>Kích hoạt</button>}
-                        <button className="btn-secondary px-2 py-1 text-[11px] text-red-600" disabled={policy.status === "active"} onClick={() => deletePolicy(policy)}>
-                          <Trash2 size={13}/>Xóa
-                        </button>
-                      </span>
-                    )}
-                  </div>
-                  <p className="muted mt-2 text-[10px]">{policy.parsed_json.faculty || "Chưa nhận diện khoa"} - {policy.parsed_json.specializations.length} nhóm chuyên môn</p>
-                </div>
-              ))}
+              <p className="muted mt-2 text-[10px]">{storage.provider} - {storage.location}</p>
             </div>
-            {!policyFiles.length && <p className="muted text-xs">Chưa có tệp chính sách. Quản trị viên hãy tải tệp chính sách để sinh cây thư mục chuẩn.</p>}
-          </div>
-        </Panel>
+          ))}
+          {!storages.length && <p className="muted text-xs">Chưa có kết nối lưu trữ ngoài nào được cấu hình.</p>}
+        </div>
+      </Panel>
 
-        <Panel title="Nhóm chuyên môn được phân công" description="Cây thư mục cá nhân được sinh từ phân công của quản trị viên hoặc trưởng bộ môn.">
-          <div className="space-y-3 p-4">
-            {!profile.policy && <p className="rounded bg-amber-50 p-3 text-xs text-amber-800">Hệ thống chưa có chính sách đang áp dụng. Vui lòng liên hệ quản trị viên.</p>}
-            {assignedSpecializations.map(spec => (
-              <div key={spec.id} className="rounded-lg border border-[var(--border)] p-3 text-sm">
-                <strong className="block">{spec.name}</strong>
-                <span className="muted text-[10px]">Nhóm chuyên môn này được phân công qua chính sách phân công giảng viên.</span>
-              </div>
-            ))}
-            {profile.policy && !assignedSpecializations.length && <p className="rounded bg-slate-50 p-3 text-xs text-slate-700">Bạn chưa được phân công nhóm chuyên môn.</p>}
-            <p className="muted text-[11px]">Không thể tự chọn chuyên môn trong phần cài đặt.</p>
-          </div>
-        </Panel>
-      </div>
-
-      <div className="mt-5 grid gap-5 xl:grid-cols-2">
-        <Panel title="Cây tri thức đang áp dụng">
-          <div className="p-4">
-            {masterTree.tree ? <TreePreview node={masterTree.tree}/> : <p className="muted text-xs">{masterTree.message || "Chưa có cây tri thức đang áp dụng."}</p>}
-          </div>
-        </Panel>
-        <Panel title="Kho lưu trữ ngoài">
-          <div className="space-y-3 p-4">
-            {storages.map(storage => (
-              <div key={storage.id} className="rounded-lg border border-[var(--border)] p-3">
-                <div className="flex items-center gap-2">
-                  <Cloud size={15} className="text-blue-600"/>
-                  <strong className="text-xs">{storage.name}</strong>
-                  <span className="badge badge-green ml-auto">{statusLabel(storage.last_status)}</span>
-                </div>
-                <p className="muted mt-2 text-[10px]">{storage.provider} - {storage.location}</p>
-              </div>
-            ))}
-          </div>
-        </Panel>
-      </div>
-
-      {permission && (
-        <Panel title="Quyền tài liệu riêng tư" className="mt-5">
-          <div className="flex items-center justify-between gap-4 p-5">
-            <div>
-              <strong className="text-sm">Chủ sở hữu phải phê duyệt</strong>
-              <p className="muted text-xs">Mọi người khác phải được chủ sở hữu duyệt trước khi xem hoặc tải tài liệu riêng tư.</p>
+      <Panel title="Desktop Agent" description="Giảng viên chỉ cần cài Desktop Agent một lần, đăng nhập một lần, sau đó bỏ tài liệu vào thư mục đã chọn." className="mt-5">
+        <div className="space-y-5 p-4">
+          <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950">
+            <div className="flex items-center gap-2 font-semibold">
+              <HardDriveDownload size={16}/>
+              Chọn thư mục theo dõi
             </div>
-            <span className="badge badge-green"><ShieldCheck size={14}/>Luôn bật</span>
+            <p className="mt-2 text-xs leading-5">
+              Mặc định hệ thống dùng <strong>D:\Teaching</strong>. Sau khi lưu, nếu máy chưa cài Desktop Agent, giảng viên chỉ cần tải ứng dụng và đăng nhập một lần.
+            </p>
           </div>
-        </Panel>
-      )}
-    </div>
-  );
-}
 
-function TreePreview({ node }: { node: FolderNode }) {
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([node.path]));
-  const [query, setQuery] = useState("");
-  const normalized = query.trim().toLocaleLowerCase("vi");
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+            <input
+              className="field"
+              value={watchFolder}
+              onChange={event => setWatchFolder(event.target.value)}
+              placeholder="Ví dụ: D:\\Teaching"
+            />
+            <button className="btn-primary" type="button" disabled={savingFolder} onClick={saveWatchFolder}>
+              <Save size={15}/>{savingFolder ? "Đang lưu..." : "Lưu"}
+            </button>
+          </div>
 
-  function matches(item: FolderNode): boolean {
-    return !normalized || item.name.toLocaleLowerCase("vi").includes(normalized) || item.children.some(matches);
-  }
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <div className="rounded-xl border border-[var(--border)] bg-white p-4">
+              <p className="muted text-[11px] uppercase tracking-[0.24em]">Desktop Agent</p>
+              <p className={`mt-2 text-base font-semibold ${agentStatus.online ? "text-emerald-600" : "text-slate-900"}`}>
+                {agentStatus.online ? "Online" : "Offline"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-[var(--border)] bg-white p-4">
+              <p className="muted text-[11px] uppercase tracking-[0.24em]">Version</p>
+              <p className="mt-2 text-base font-semibold text-slate-900">{agentStatus.version || "Chưa có"}</p>
+            </div>
+            <div className="rounded-xl border border-[var(--border)] bg-white p-4">
+              <p className="muted text-[11px] uppercase tracking-[0.24em]">Watch Folder</p>
+              <p className="mt-2 break-all text-sm font-semibold text-slate-900">{effectiveWatchFolder}</p>
+            </div>
+            <div className="rounded-xl border border-[var(--border)] bg-white p-4">
+              <p className="muted text-[11px] uppercase tracking-[0.24em]">Last Sync</p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">{formatStatusTime(agentStatus.last_sync)}</p>
+            </div>
+            <div className="rounded-xl border border-[var(--border)] bg-white p-4">
+              <p className="muted text-[11px] uppercase tracking-[0.24em]">Connection Status</p>
+              <p className="mt-2 text-base font-semibold text-slate-900">{agentStatus.connection_status || "Offline"}</p>
+            </div>
+          </div>
 
-  function toggle(path: string) {
-    setExpanded(current => {
-      const next = new Set(current);
-      if (next.has(path)) next.delete(path); else next.add(path);
-      return next;
-    });
-  }
+          {agentStatus.last_error && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
+              {agentStatus.last_error}
+            </div>
+          )}
 
-  function render(item: FolderNode, depth = 0): ReactNode {
-    if (!matches(item)) return null;
-    const isExpanded = expanded.has(item.path) || !!normalized;
-    return (
-      <div key={item.id}>
-        <button type="button" className="flex w-full items-center gap-1 rounded-md py-1.5 pr-2 text-left text-xs hover:bg-[var(--soft)]" style={{ paddingLeft: `${6 + depth * 16}px` }} onClick={() => toggle(item.path)}>
-          {item.children.length ? (isExpanded ? <ChevronDown size={14}/> : <ChevronRight size={14}/>) : <span className="w-[14px]"/>}
-          {isExpanded ? <FolderOpen className="text-amber-500" size={15}/> : <Folder className="text-amber-500" size={15}/>}
-          <span className="truncate font-semibold">{item.name}</span>
-        </button>
-        {isExpanded && item.children.map(child => render(child, depth + 1))}
-      </div>
-    );
-  }
+          {hasSavedConfig && !agentStatus.installed && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm font-semibold text-slate-900">Desktop Agent is not installed.</p>
+              <p className="muted mt-2 text-xs">
+                Hãy tải ứng dụng về máy, mở file cài đặt, rồi đăng nhập một lần để hệ thống tự theo dõi thư mục này.
+              </p>
+            </div>
+          )}
 
-  return (
-    <div>
-      <div className="relative mb-3">
-        <Search className="muted absolute left-3 top-2.5" size={14}/>
-        <input className="field" style={{ paddingLeft: "2.25rem" }} value={query} onChange={event => setQuery(event.target.value)} placeholder="Tìm nhánh trong cây tri thức..."/>
-      </div>
-      <div role="tree" className="max-h-[50vh] overflow-auto">{render(node)}</div>
+          {hasSavedConfig && !agentStatus.installed && (
+            <div className="flex flex-wrap items-center gap-3">
+              <a className="btn-primary" href={installerHref}>
+                <Download size={15}/>Download Desktop Agent
+              </a>
+              <p className="muted text-[11px]">
+                Sau khi cài xong, ứng dụng sẽ tự chạy lại cùng Windows và tiếp tục theo dõi thư mục đã lưu.
+              </p>
+            </div>
+          )}
+        </div>
+      </Panel>
     </div>
   );
 }

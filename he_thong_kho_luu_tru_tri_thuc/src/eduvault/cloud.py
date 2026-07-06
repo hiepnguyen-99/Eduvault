@@ -32,6 +32,16 @@ def load_env_file() -> None:
 
 load_env_file()
 
+
+def _looks_like_placeholder(value: str) -> bool:
+    cleaned = str(value or "").strip().lower()
+    if not cleaned:
+        return True
+    return cleaned in {
+        "replace-me",
+        "changeme",
+    } or cleaned.startswith("replace-with")
+
 PROVIDERS = {
     "google_drive": {
         "label": "Google Drive",
@@ -54,14 +64,37 @@ PROVIDERS = {
 }
 
 
+def _public_backend_base_url() -> str:
+    return (
+        os.getenv("BACKEND_URL", "").strip().rstrip("/")
+        or os.getenv("PUBLIC_API_BASE_URL", "").strip().rstrip("/")
+        or os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    )
+
+
+def _resolved_redirect_uri(provider: str) -> str:
+    config = PROVIDERS[provider]
+    explicit = os.getenv(config["redirect_uri"], "").strip()
+    if explicit:
+        return explicit
+    base_url = _public_backend_base_url()
+    if not base_url:
+        return ""
+    return f"{base_url}/api/cloud/callback/{provider}"
+
+
 def provider_status(provider: str) -> dict:
     config = PROVIDERS[provider]
-    required = ("client_id", "client_secret", "redirect_uri")
+    required = ("client_id", "client_secret")
+    oauth_values = [os.getenv(config[key], "").strip() for key in required]
+    redirect_uri = _resolved_redirect_uri(provider)
+    token_secret = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
     return {
         "provider": provider,
         "label": config["label"],
-        "configured": all(os.getenv(config[key], "").strip() for key in required)
-        and bool(os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()),
+        "configured": all(not _looks_like_placeholder(value) for value in oauth_values)
+        and not _looks_like_placeholder(redirect_uri)
+        and not _looks_like_placeholder(token_secret),
     }
 
 
@@ -90,7 +123,7 @@ def authorization_url(db, user_code: str, provider: str) -> str:
     )
     params = {
         "client_id": os.getenv(config["client_id"]),
-        "redirect_uri": os.getenv(config["redirect_uri"]),
+        "redirect_uri": _resolved_redirect_uri(provider),
         "response_type": "code",
         "scope": config["scope"],
         "state": state,
@@ -112,7 +145,7 @@ def exchange_code(db, provider: str, state: str, code: str) -> dict:
         {
             "client_id": os.getenv(config["client_id"]),
             "client_secret": os.getenv(config["client_secret"]),
-            "redirect_uri": os.getenv(config["redirect_uri"]),
+            "redirect_uri": _resolved_redirect_uri(provider),
             "grant_type": "authorization_code",
             "code": code,
         },
